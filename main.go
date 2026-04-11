@@ -49,6 +49,7 @@ var ctap2Enc cbor.EncMode = func() cbor.EncMode {
 type tokenResponder interface {
 	WriteResponse(ctx context.Context, evt fidohid.AuthEvent, data []byte, status uint16) error
 	WriteCtap2Response(ctx context.Context, evt fidohid.AuthEvent, status byte, data []byte) error
+	SendKeepalive(evt fidohid.AuthEvent, status byte) error
 }
 
 func main() {
@@ -753,33 +754,58 @@ func (s *server) handleGetAssertion(ctx context.Context, token tokenResponder, e
 		keyHandle = storedCred.CredID
 	}
 
-	resultCh, err := s.verifier.VerifyUser("FIDO2 Authenticate: " + req.RPID)
-	if err != nil {
-		log.Printf("GetAssertion verifier err: %s", err)
-		token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
-		return
-	}
-	childCtx, cancel := context.WithTimeout(ctx, 35*time.Second)
-	defer cancel()
-	select {
-	case result := <-resultCh:
-		if !result.OK {
-			if result.Error != nil {
-				log.Printf("GetAssertion verifier result err: %s", result.Error)
-			}
-			token.WriteCtap2Response(ctx, evt, statusForFailure(result), nil)
+	upRequired := req.Options == nil || req.Options.UP == nil || *req.Options.UP
+	if upRequired {
+		resultCh, err := s.verifier.VerifyUser("FIDO2 Authenticate: " + req.RPID)
+		if err != nil {
+			log.Printf("GetAssertion verifier err: %s", err)
+			token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
 			return
 		}
-	case <-childCtx.Done():
-		token.WriteCtap2Response(ctx, evt, ctap2.StatusUserActionTimeout, nil)
-		return
+		childCtx, cancel := context.WithTimeout(ctx, 35*time.Second)
+		defer cancel()
+		keepaliveDone := make(chan struct{})
+		keepaliveStopped := make(chan struct{})
+		go func() {
+			defer close(keepaliveStopped)
+			ticker := time.NewTicker(100 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					token.SendKeepalive(evt, 0x02)
+				case <-keepaliveDone:
+					return
+				}
+			}
+		}()
+		select {
+		case result := <-resultCh:
+			close(keepaliveDone)
+			<-keepaliveStopped
+			if !result.OK {
+				if result.Error != nil {
+					log.Printf("GetAssertion verifier result err: %s", result.Error)
+				}
+				token.WriteCtap2Response(ctx, evt, statusForFailure(result), nil)
+				return
+			}
+		case <-childCtx.Done():
+			close(keepaliveDone)
+			<-keepaliveStopped
+			token.WriteCtap2Response(ctx, evt, ctap2.StatusUserActionTimeout, nil)
+			return
+		}
+	} else {
+		log.Printf("GetAssertion: up=false probe, skipping verification for rp=%s", req.RPID)
 	}
 
-	// authenticatorData: rpIdHash(32) | flags(1) | signCount(4)
-	// UV flag is set only when the verifier actually verified the user's identity.
-	authFlags := ctap2.AuthFlagUP
-	if s.verifier.PerformsUV() {
-		authFlags |= ctap2.AuthFlagUV
+	var authFlags byte
+	if upRequired {
+		authFlags = ctap2.AuthFlagUP
+		if s.verifier.PerformsUV() {
+			authFlags |= ctap2.AuthFlagUV
+		}
 	}
 
 	var authDataBuf bytes.Buffer

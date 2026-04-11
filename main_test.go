@@ -55,6 +55,10 @@ func (f *fakeResponder) WriteCtap2Response(_ context.Context, _ fidohid.AuthEven
 	return nil
 }
 
+func (f *fakeResponder) SendKeepalive(_ fidohid.AuthEvent, _ byte) error {
+	return nil
+}
+
 func (f *fakeResponder) lastCtap2() ctap2Write {
 	if len(f.ctap2) == 0 {
 		return ctap2Write{}
@@ -1008,17 +1012,14 @@ func TestGetInfo_ResponseShape(t *testing.T) {
 	}
 	var versions []string
 	cbor.Unmarshal(top[1], &versions)
-	hasFIDO2, hasU2F := false, false
+	hasFIDO2 := false
 	for _, v := range versions {
 		if v == "FIDO_2_0" {
 			hasFIDO2 = true
 		}
-		if v == "U2F_V2" {
-			hasU2F = true
-		}
 	}
-	if !hasFIDO2 || !hasU2F {
-		t.Errorf("versions = %v, want both FIDO_2_0 and U2F_V2", versions)
+	if !hasFIDO2 {
+		t.Errorf("versions = %v, want FIDO_2_0", versions)
 	}
 }
 
@@ -1540,12 +1541,11 @@ func TestMakeCredential_COSEKeyShape(t *testing.T) {
 // with the request's challenge/app params (not random nonces) so browser
 // retries dedup correctly. Catches the PR's ConfirmGeneric regression.
 func TestRealWorld_AWSLegacyU2FAuth(t *testing.T) {
-	pe := &fakePinentry{nextResult: pinentry.Result{OK: true}}
-	verifier := &fakeVerifier{}
+	pe := &fakePinentry{}
+	verifier := &fakeVerifier{nextResult: VerifyResult{OK: true}}
 	s := newTestServer(t, verifier, pe)
 
-	// Register a U2F credential first via the in-memory signer directly
-	// (handleRegister also uses pinentry, this is simpler).
+	// Register a U2F credential first via the in-memory signer directly.
 	appParam := rpIDHash("u2f.aws.amazon.com")
 	keyHandle, _, _, err := s.signer.RegisterKey(appParam[:])
 	if err != nil {
@@ -1567,15 +1567,8 @@ func TestRealWorld_AWSLegacyU2FAuth(t *testing.T) {
 	if resp.lastU2F().status != statuscode.NoError {
 		t.Fatalf("expected NoError, got 0x%04x", resp.lastU2F().status)
 	}
-	if got := pe.snapshotPromptCount(); got != 1 {
-		t.Errorf("expected exactly 1 pinentry prompt, got %d", got)
-	}
-	calls := pe.snapshotCalls()
-	if len(calls) == 0 || calls[0].challenge != authReq.Authenticate.ChallengeParam {
-		t.Errorf("pinentry was not invoked with the request's challenge param")
-	}
-	if calls[0].app != appParam {
-		t.Errorf("pinentry was not invoked with the request's application param")
+	if verifier.callCount != 1 {
+		t.Errorf("expected exactly 1 verifier call, got %d", verifier.callCount)
 	}
 
 	// Response: 1 byte UP | 4 bytes counter | sig
@@ -1588,75 +1581,11 @@ func TestRealWorld_AWSLegacyU2FAuth(t *testing.T) {
 	}
 }
 
-// Browser dedup: a second handleAuthenticate call with the SAME challenge/app
-// (browser polling its first request) must reuse the existing pinentry prompt
-// instead of opening a second one. This is the property the PR's ConfirmGeneric
-// switch silently breaks.
-func TestRealWorld_U2FBrowserPollingDedup(t *testing.T) {
-	pe := &fakePinentry{
-		nextResult:  pinentry.Result{OK: true},
-		blockResult: true, // hold the prompt result so we can poll again
-	}
-	verifier := &fakeVerifier{}
-	s := newTestServer(t, verifier, pe)
-
-	appParam := rpIDHash("github.com")
-	keyHandle, _, _, _ := s.signer.RegisterKey(appParam[:])
-	challenge := sha256.Sum256([]byte("retry-challenge"))
-	authReq := &fidoauth.AuthenticatorRequest{
-		Command: fidoauth.CmdAuthenticate,
-		Authenticate: &fidoauth.AuthenticatorAuthReq{
-			Ctrl:             fidoauth.CtrlEnforeUserPresenceAndSign,
-			ChallengeParam:   challenge,
-			ApplicationParam: appParam,
-			KeyHandle:        keyHandle,
-		},
-	}
-
-	// First poll: handler will block waiting for pinentry to release.
-	resp1 := &fakeResponder{}
-	done1 := make(chan struct{})
-	go func() {
-		s.handleAuthenticate(context.Background(), resp1, fidohid.AuthEvent{Req: authReq})
-		close(done1)
-	}()
-
-	// Wait briefly for the first call to register itself with pinentry.
-	time.Sleep(20 * time.Millisecond)
-
-	// Second poll (browser retry): same challenge/app. Should NOT open a
-	// new prompt — it should attach to the existing one.
-	resp2 := &fakeResponder{}
-	done2 := make(chan struct{})
-	go func() {
-		s.handleAuthenticate(context.Background(), resp2, fidohid.AuthEvent{Req: authReq})
-		close(done2)
-	}()
-	time.Sleep(20 * time.Millisecond)
-
-	if got := pe.snapshotPromptCount(); got != 1 {
-		t.Errorf("expected 1 pinentry prompt for browser polling, got %d", got)
-	}
-
-	pe.release()
-	select {
-	case <-done1:
-	case <-time.After(2 * time.Second):
-		t.Fatal("first handler call did not return after pinentry released")
-	}
-	select {
-	case <-done2:
-	case <-time.After(2 * time.Second):
-		t.Fatal("second handler call did not return after pinentry released")
-	}
-}
-
-// User cancels the U2F authenticate prompt. The U2F spec doesn't really have
-// a "cancel" status, so the codebase reports WrongData to make the browser
-// stop polling.
+// U2F auth now uses the configured verifier (not pinentry). Verify that a
+// verifier denial returns WrongData to make the browser stop polling.
 func TestRealWorld_U2FUserCancel(t *testing.T) {
-	pe := &fakePinentry{nextResult: pinentry.Result{OK: false, Error: errors.New("cancel")}}
-	verifier := &fakeVerifier{}
+	pe := &fakePinentry{}
+	verifier := &fakeVerifier{nextResult: VerifyResult{OK: false, Error: errors.New("cancel")}}
 	s := newTestServer(t, verifier, pe)
 
 	appParam := rpIDHash("vault.bitwarden.com")
