@@ -162,7 +162,9 @@ const (
 	CmdLock  CmdType = 0x04 // Send lock channel command
 	CmdInit  CmdType = 0x06 // Channel initialization
 	CmdWink  CmdType = 0x08 // Send device identification wink
-	CmdCbor  CmdType = 0x10 // Send encapsulated CTAP CBOR
+	CmdCbor      CmdType = 0x10 // Send encapsulated CTAP CBOR
+	CmdCancel    CmdType = 0x11 // Cancel ongoing operation
+	CmdKeepalive CmdType = 0x3b // Keepalive during user verification
 	CmdSync  CmdType = 0x3c // Protocol resync command
 	CmdError CmdType = 0x3f // Error response
 
@@ -430,7 +432,7 @@ func newInitResponse(channelID uint32, nonce [8]byte) *initResponse {
 		MajorDeviceVersion: deviceMajor,
 		MinorDeviceVersion: deviceMinor,
 		BuildDeviceVersion: deviceBuild,
-		RawCapabilities: cborCapability,
+		RawCapabilities: cborCapability | nmsgCapability,
 	}
 }
 
@@ -457,10 +459,18 @@ func (t *SoftToken) WriteResponse(ctx context.Context, evt AuthEvent, data []byt
 // No trailing U2F status word is appended.
 func (t *SoftToken) WriteCtap2Response(ctx context.Context, evt AuthEvent, status byte, data []byte) error {
 	payload := append([]byte{status}, data...)
+	log.Printf("WriteCtap2Response: status=0x%02x payloadLen=%d chanID=0x%08x", status, len(payload), evt.chanID)
 	return writeRespose(t.device, evt.chanID, CmdCbor, payload, 0)
 }
 
+// SendKeepalive sends a CTAPHID_KEEPALIVE message with the given status byte.
+// Status: 0x01 = processing, 0x02 = user presence needed.
+func (t *SoftToken) SendKeepalive(evt AuthEvent, status byte) error {
+	return writeRespose(t.device, evt.chanID, CmdKeepalive, []byte{status}, 0)
+}
+
 func writeRespose(d *uhid.Device, chanID uint32, cmd CmdType, data []byte, status uint16) error {
+	log.Printf("writeRespose: cmd=0x%02x chanID=0x%08x dataLen=%d status=0x%04x", cmd, chanID, len(data), status)
 
 	initial := true
 	pktSize := initialPacketDataLen
