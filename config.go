@@ -10,6 +10,7 @@ import (
 // SiteConfig holds per-site flag overrides.
 type SiteConfig struct {
 	BackupEligible bool `json:"backup_eligible"`
+	AutoApprove    bool `json:"auto_approve"`
 }
 
 // Config is loaded from ~/.config/linux-id/config.json.
@@ -45,4 +46,17 @@ func (c *Config) BackupEligible(rpId string) bool {
 		return false
 	}
 	return site.BackupEligible
+}
+
+// AutoApprove returns true if the given rpId has auto_approve set in config,
+// allowing operations to proceed without user verification.
+func (c *Config) AutoApprove(rpId string) bool {
+	if c.Sites == nil {
+		return false
+	}
+	site, ok := c.Sites[rpId]
+	if !ok {
+		return false
+	}
+	return site.AutoApprove
 }

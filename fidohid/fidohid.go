@@ -141,6 +141,8 @@ func (t *SoftToken) Run(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			}
+		case CmdCancel:
+			log.Print("got CmdCancel, ignoring")
 		default:
 			log.Printf("unsuppoted cmd: %s %d", cmd, cmd)
 			writeRespose(t.device, reqChanID, cmd, nil, swInsNotSupported)

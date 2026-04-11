@@ -21,6 +21,7 @@ import (
 	"github.com/matejsmycka/linux-id/fidoauth"
 	"github.com/matejsmycka/linux-id/fidohid"
 	"github.com/matejsmycka/linux-id/pinentry"
+	"github.com/matejsmycka/linux-id/powerled"
 	"github.com/matejsmycka/linux-id/statuscode"
 )
 
@@ -265,6 +266,7 @@ func newTestServer(t *testing.T, verifier UserVerifier, pe pinentryClient) *serv
 		signer:   newFakeSigner(),
 		cs:       ctap2.NewCredStore(),
 		ecdhPriv: ecdhKey,
+		led:      powerled.New(),
 	}
 }
 
@@ -1015,7 +1017,7 @@ func TestGetInfo_ResponseShape(t *testing.T) {
 	if err := cbor.Unmarshal(resp.lastCtap2().data, &top); err != nil {
 		t.Fatalf("response is not well-formed CBOR: %s", err)
 	}
-	for _, k := range []int{1, 3, 4, 5} {
+	for _, k := range []int{1, 2, 3, 4, 5, 6} {
 		if _, ok := top[k]; !ok {
 			t.Errorf("GetInfo response missing field %d", k)
 		}

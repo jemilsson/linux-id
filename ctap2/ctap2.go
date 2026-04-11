@@ -59,7 +59,9 @@ type ClientPINRequest struct {
 
 // ClientPIN subcommands.
 const (
+	ClientPINGetRetries      = 0x01
 	ClientPINGetKeyAgreement = 0x02
+	ClientPINGetUVRetries    = 0x07
 )
 
 type RPEntity struct {

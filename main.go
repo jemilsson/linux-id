@@ -26,6 +26,7 @@ import (
 	"github.com/matejsmycka/linux-id/fprintd"
 	"github.com/matejsmycka/linux-id/memory"
 	"github.com/matejsmycka/linux-id/pinentry"
+	"github.com/matejsmycka/linux-id/powerled"
 	"github.com/matejsmycka/linux-id/sitesignatures"
 	"github.com/matejsmycka/linux-id/statuscode"
 	"github.com/matejsmycka/linux-id/tpm"
@@ -186,6 +187,8 @@ type server struct {
 	// ECDH key pair for hmac-secret / clientPIN key agreement (pinProtocol 1).
 	// Generated once at startup, discarded on power-off.
 	ecdhPriv *ecdsa.PrivateKey
+
+	led *powerled.Blinker
 }
 
 type Signer interface {
@@ -202,6 +205,7 @@ func newServer() *server {
 		pe:  pe,
 		cs:  ctap2.NewCredStore(),
 		cfg: cfg,
+		led: powerled.New(),
 	}
 
 	var inner UserVerifier
@@ -352,9 +356,11 @@ func (s *server) handleAuthenticate(parentCtx context.Context, token tokenRespon
 
 		childCtx, cancel := context.WithTimeout(parentCtx, 35*time.Second)
 		defer cancel()
+		s.led.Start(500 * time.Millisecond)
 
 		select {
 		case result := <-resultCh:
+			s.led.Stop()
 			if result.OK {
 				userPresent = 0x01
 			} else {
@@ -368,6 +374,7 @@ func (s *server) handleAuthenticate(parentCtx context.Context, token tokenRespon
 				return
 			}
 		case <-childCtx.Done():
+			s.led.Stop()
 			err := token.WriteResponse(parentCtx, evt, nil, statuscode.ConditionsNotSatisfied)
 			if err != nil {
 				log.Printf("Write swConditionsNotSatisfied resp err: %s", err)
@@ -375,6 +382,9 @@ func (s *server) handleAuthenticate(parentCtx context.Context, token tokenRespon
 			return
 		}
 	}
+
+	s.led.Start(100 * time.Millisecond)
+	defer s.led.Stop()
 
 	signCounter := s.signer.Counter()
 
@@ -418,8 +428,10 @@ func (s *server) handleRegister(parentCtx context.Context, token tokenResponder,
 		return
 	}
 
+	s.led.Start(500 * time.Millisecond)
 	select {
 	case result := <-pinResultCh:
+		s.led.Stop()
 		if !result.OK {
 			if result.Error != nil {
 				log.Printf("Got pinentry result err: %s", result.Error)
@@ -438,6 +450,7 @@ func (s *server) handleRegister(parentCtx context.Context, token tokenResponder,
 
 		s.registerSite(parentCtx, token, evt)
 	case <-ctx.Done():
+		s.led.Stop()
 		err := token.WriteResponse(ctx, evt, nil, statuscode.ConditionsNotSatisfied)
 		if err != nil {
 			log.Printf("Write swConditionsNotSatisfied resp err: %s", err)
@@ -447,6 +460,9 @@ func (s *server) handleRegister(parentCtx context.Context, token tokenResponder,
 }
 
 func (s *server) registerSite(ctx context.Context, token tokenResponder, evt fidohid.AuthEvent) {
+	s.led.Start(100 * time.Millisecond)
+	defer s.led.Stop()
+
 	req := evt.Req
 
 	keyHandle, x, y, err := s.signer.RegisterKey(req.Register.ApplicationParam[:])
@@ -529,11 +545,11 @@ func (s *server) handleGetInfo(ctx context.Context, token tokenResponder, evt fi
 
 	response := map[int]interface{}{
 		1: []string{"FIDO_2_0"},
+		2: []string{"hmac-secret"},      // extensions
 		3: make([]byte, 16),             // AAGUID: 16 zero bytes (uncertified)
 		4: options,
 		5: 1200,                         // maxMsgSize
-		6: []string{"hmac-secret"},      // extensions
-		9: []int{1},                     // pinUvAuthProtocols
+		6: []int{1},                     // pinUvAuthProtocols
 	}
 	encoded, err := ctap2Enc.Marshal(response)
 	if err != nil {
@@ -587,46 +603,56 @@ func (s *server) handleMakeCredential(ctx context.Context, token tokenResponder,
 	// Per spec §6.1: user presence MUST be obtained before checking excludeList.
 	// Checking after UP prevents timing attacks that reveal credential existence
 	// without user consent.
-	resultCh, err := s.verifier.VerifyUser("FIDO2 Register: " + req.RP.ID)
-	if err != nil {
-		log.Printf("MakeCredential verifier err: %s", err)
-		token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
-		return
-	}
-	childCtx, cancel := context.WithTimeout(ctx, 35*time.Second)
-	defer cancel()
-	keepaliveDone := make(chan struct{})
-	keepaliveStopped := make(chan struct{})
-	go func() {
-		defer close(keepaliveStopped)
-		ticker := time.NewTicker(100 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				token.SendKeepalive(evt, 0x02)
-			case <-keepaliveDone:
-				return
-			}
-		}
-	}()
-	select {
-	case result := <-resultCh:
-		close(keepaliveDone)
-		<-keepaliveStopped
-		if !result.OK {
-			if result.Error != nil {
-				log.Printf("MakeCredential verifier result err: %s", result.Error)
-			}
-			token.WriteCtap2Response(ctx, evt, statusForFailure(result), nil)
+	if s.cfg.AutoApprove(req.RP.ID) {
+		log.Printf("MakeCredential: auto-approving for rp=%s", req.RP.ID)
+	} else {
+		resultCh, err := s.verifier.VerifyUser("FIDO2 Register: " + req.RP.ID)
+		if err != nil {
+			log.Printf("MakeCredential verifier err: %s", err)
+			token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
 			return
 		}
-	case <-childCtx.Done():
-		close(keepaliveDone)
-		<-keepaliveStopped
-		token.WriteCtap2Response(ctx, evt, ctap2.StatusUserActionTimeout, nil)
-		return
+		childCtx, cancel := context.WithTimeout(ctx, 35*time.Second)
+		defer cancel()
+		s.led.Start(500 * time.Millisecond)
+		keepaliveDone := make(chan struct{})
+		keepaliveStopped := make(chan struct{})
+		go func() {
+			defer close(keepaliveStopped)
+			ticker := time.NewTicker(100 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					token.SendKeepalive(evt, 0x02)
+				case <-keepaliveDone:
+					return
+				}
+			}
+		}()
+		select {
+		case result := <-resultCh:
+			close(keepaliveDone)
+			<-keepaliveStopped
+			s.led.Stop()
+			if !result.OK {
+				if result.Error != nil {
+					log.Printf("MakeCredential verifier result err: %s", result.Error)
+				}
+				token.WriteCtap2Response(ctx, evt, statusForFailure(result), nil)
+				return
+			}
+		case <-childCtx.Done():
+			close(keepaliveDone)
+			<-keepaliveStopped
+			s.led.Stop()
+			token.WriteCtap2Response(ctx, evt, ctap2.StatusUserActionTimeout, nil)
+			return
+		}
 	}
+
+	s.led.Start(100 * time.Millisecond)
+	defer s.led.Stop()
 
 	// Check excludeList after UP: if a credential already exists for this RP, reject.
 	if len(req.ExcludeList) > 0 {
@@ -804,7 +830,9 @@ func (s *server) handleGetAssertion(ctx context.Context, token tokenResponder, e
 	}
 
 	upRequired := req.Options == nil || req.Options.UP == nil || *req.Options.UP
-	if upRequired {
+	if upRequired && s.cfg.AutoApprove(req.RPID) {
+		log.Printf("GetAssertion: auto-approving for rp=%s", req.RPID)
+	} else if upRequired {
 		resultCh, err := s.verifier.VerifyUser("FIDO2 Authenticate: " + req.RPID)
 		if err != nil {
 			log.Printf("GetAssertion verifier err: %s", err)
@@ -813,6 +841,7 @@ func (s *server) handleGetAssertion(ctx context.Context, token tokenResponder, e
 		}
 		childCtx, cancel := context.WithTimeout(ctx, 35*time.Second)
 		defer cancel()
+		s.led.Start(500 * time.Millisecond)
 		keepaliveDone := make(chan struct{})
 		keepaliveStopped := make(chan struct{})
 		go func() {
@@ -832,6 +861,7 @@ func (s *server) handleGetAssertion(ctx context.Context, token tokenResponder, e
 		case result := <-resultCh:
 			close(keepaliveDone)
 			<-keepaliveStopped
+			s.led.Stop()
 			if !result.OK {
 				if result.Error != nil {
 					log.Printf("GetAssertion verifier result err: %s", result.Error)
@@ -842,12 +872,16 @@ func (s *server) handleGetAssertion(ctx context.Context, token tokenResponder, e
 		case <-childCtx.Done():
 			close(keepaliveDone)
 			<-keepaliveStopped
+			s.led.Stop()
 			token.WriteCtap2Response(ctx, evt, ctap2.StatusUserActionTimeout, nil)
 			return
 		}
 	} else {
 		log.Printf("GetAssertion: up=false probe, skipping verification for rp=%s", req.RPID)
 	}
+
+	s.led.Start(100 * time.Millisecond)
+	defer s.led.Stop()
 
 	var authFlags byte
 	if upRequired {
@@ -940,7 +974,31 @@ func (s *server) handleClientPIN(ctx context.Context, token tokenResponder, evt 
 		return
 	}
 
-	if req.SubCommand != ctap2.ClientPINGetKeyAgreement {
+	switch req.SubCommand {
+	case ctap2.ClientPINGetRetries:
+		// No PIN is set; return max retries to indicate healthy state.
+		resp := map[int]interface{}{3: 8} // retries
+		encoded, err := ctap2Enc.Marshal(resp)
+		if err != nil {
+			token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
+			return
+		}
+		log.Print("ClientPIN: returning PIN retries")
+		token.WriteCtap2Response(ctx, evt, ctap2.StatusOK, encoded)
+		return
+	case ctap2.ClientPINGetUVRetries:
+		resp := map[int]interface{}{5: 8} // uvRetries
+		encoded, err := ctap2Enc.Marshal(resp)
+		if err != nil {
+			token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
+			return
+		}
+		log.Print("ClientPIN: returning UV retries")
+		token.WriteCtap2Response(ctx, evt, ctap2.StatusOK, encoded)
+		return
+	case ctap2.ClientPINGetKeyAgreement:
+		// handled below
+	default:
 		log.Printf("ClientPIN: unsupported subCommand %d", req.SubCommand)
 		token.WriteCtap2Response(ctx, evt, ctap2.StatusNotAllowed, nil)
 		return
