@@ -507,7 +507,7 @@ func (s *server) handleGetInfo(ctx context.Context, token tokenResponder, evt fi
 	}
 
 	response := map[int]interface{}{
-		1: []string{"FIDO_2_0", "U2F_V2"},
+		1: []string{"FIDO_2_0"},
 		3: make([]byte, 16), // AAGUID: 16 zero bytes (uncertified)
 		4: options,
 		5: 1200, // maxMsgSize
