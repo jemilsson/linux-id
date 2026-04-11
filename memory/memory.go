@@ -3,6 +3,7 @@ package memory
 import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
@@ -97,6 +98,15 @@ func (m *Mem) SignASN1(keyHandle, applicationParam, digest []byte) ([]byte, erro
 	ecdsaKey.PublicKey.X, ecdsaKey.PublicKey.Y = curve.ScalarBaseMult(childPrivateKey)
 
 	return ecdsa.SignASN1(rand.Reader, &ecdsaKey, digest)
+}
+
+// UnsealCredRandom derives a deterministic CredRandom for the hmac-secret extension.
+// For the memory backend this uses HMAC(masterKey, keyHandle) since there is no TPM.
+func (m *Mem) UnsealCredRandom(keyHandle, applicationParam []byte) ([]byte, error) {
+	h := hmac.New(sha256.New, m.masterPrivateKey)
+	h.Write(keyHandle)
+	h.Write([]byte("linux-id-hmac-secret"))
+	return h.Sum(nil), nil
 }
 
 func mustRand(size int) []byte {

@@ -169,12 +169,46 @@ func (t *TPM) RegisterKey(applicationParam []byte) ([]byte, *big.Int, *big.Int, 
 		return nil, nil, nil, fmt.Errorf("CreateKey (child) err: %w", err)
 	}
 
+	// Create a sealed data object for hmac-secret CredRandom.
+	credRandom := mustRand(32)
+	sealTmpl := tpm2.TPMTPublic{
+		Type:    tpm2.TPMAlgKeyedHash,
+		NameAlg: tpm2.TPMAlgSHA256,
+		ObjectAttributes: tpm2.TPMAObject{
+			FixedTPM:     true,
+			FixedParent:  true,
+			UserWithAuth: true,
+		},
+		Parameters: tpm2.NewTPMUPublicParms(
+			tpm2.TPMAlgKeyedHash,
+			&tpm2.TPMSKeyedHashParms{Scheme: tpm2.TPMTKeyedHashScheme{Scheme: tpm2.TPMAlgNull}},
+		),
+	}
+	sealRsp, err := tpm2.Create{
+		ParentHandle: tpm2.AuthHandle{
+			Handle: parentHandle,
+			Name:   createPrimaryRsp.Name,
+			Auth:   tpm2.PasswordAuth(nil),
+		},
+		InPublic: tpm2.New2B(sealTmpl),
+		InSensitive: tpm2.TPM2BSensitiveCreate{
+			Sensitive: &tpm2.TPMSSensitiveCreate{
+				Data: tpm2.NewTPMUSensitiveCreate(&tpm2.TPM2BSensitiveData{Buffer: credRandom}),
+			},
+		},
+	}.Execute(tpmConn)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("seal CredRandom err: %w", err)
+	}
+
 	var out bytes.Buffer
 	enc := lencode.NewEncoder(&out, lencode.SeparatorOpt(separator))
 
 	enc.Encode(createRsp.OutPrivate.Buffer)
 	enc.Encode(createRsp.OutPublic.Bytes())
 	enc.Encode(randSeed)
+	enc.Encode(sealRsp.OutPrivate.Buffer)
+	enc.Encode(sealRsp.OutPublic.Bytes())
 
 	loadRsp, err := tpm2.Load{
 		ParentHandle: tpm2.AuthHandle{
@@ -245,11 +279,7 @@ func (t *TPM) SignASN1(keyHandle, applicationParam, digest []byte) ([]byte, erro
 	if err != nil {
 		return nil, invalidHandleErr
 	}
-
-	_, err = dec.Decode()
-	if err != io.EOF {
-		return nil, invalidHandleErr
-	}
+	// Additional fields (credRandom sealed data) may follow; ignore them here.
 
 	srkTemplate := primaryKeyTmpl(seed, applicationParam)
 
@@ -322,6 +352,89 @@ func (t *TPM) SignASN1(keyHandle, applicationParam, digest []byte) ([]byte, erro
 	})
 
 	return b.Bytes()
+}
+
+// UnsealCredRandom recovers the hmac-secret CredRandom from a key handle.
+// Returns nil, error if the key handle predates hmac-secret support.
+func (t *TPM) UnsealCredRandom(keyHandle, applicationParam []byte) ([]byte, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	dec := lencode.NewDecoder(bytes.NewReader(keyHandle), lencode.SeparatorOpt(separator))
+
+	// Skip signing key private/public bytes.
+	if _, err := dec.Decode(); err != nil {
+		return nil, fmt.Errorf("invalid key handle")
+	}
+	if _, err := dec.Decode(); err != nil {
+		return nil, fmt.Errorf("invalid key handle")
+	}
+
+	seed, err := dec.Decode()
+	if err != nil {
+		return nil, fmt.Errorf("invalid key handle")
+	}
+
+	sealedPriv, err := dec.Decode()
+	if err == io.EOF {
+		return nil, fmt.Errorf("key handle has no CredRandom (pre-hmac-secret credential)")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("invalid key handle")
+	}
+
+	sealedPub, err := dec.Decode()
+	if err != nil {
+		return nil, fmt.Errorf("invalid key handle")
+	}
+
+	tpmConn, err := t.open()
+	if err != nil {
+		return nil, fmt.Errorf("open tpm err: %w", err)
+	}
+	defer tpmConn.Close()
+
+	srkTemplate := primaryKeyTmpl(seed, applicationParam)
+	createPrimaryRsp, err := tpm2.CreatePrimary{
+		PrimaryHandle: tpm2.AuthHandle{
+			Handle: tpm2.TPMRHOwner,
+			Auth:   tpm2.PasswordAuth(nil),
+		},
+		InPublic: tpm2.New2B(srkTemplate),
+	}.Execute(tpmConn)
+	if err != nil {
+		return nil, fmt.Errorf("CreatePrimary err: %w", err)
+	}
+	parentHandle := createPrimaryRsp.ObjectHandle
+	defer tpm2.FlushContext{FlushHandle: parentHandle}.Execute(tpmConn)
+
+	loadRsp, err := tpm2.Load{
+		ParentHandle: tpm2.AuthHandle{
+			Handle: parentHandle,
+			Name:   createPrimaryRsp.Name,
+			Auth:   tpm2.PasswordAuth(nil),
+		},
+		InPrivate: tpm2.TPM2BPrivate{Buffer: sealedPriv},
+		InPublic:  tpm2.BytesAs2B[tpm2.TPMTPublic, *tpm2.TPMTPublic](sealedPub),
+	}.Execute(tpmConn)
+	if err != nil {
+		return nil, fmt.Errorf("load sealed CredRandom err: %w", err)
+	}
+	sealedHandle := loadRsp.ObjectHandle
+	defer tpm2.FlushContext{FlushHandle: sealedHandle}.Execute(tpmConn)
+
+	unsealRsp, err := tpm2.Unseal{
+		ItemHandle: tpm2.AuthHandle{
+			Handle: sealedHandle,
+			Name:   loadRsp.Name,
+			Auth:   tpm2.PasswordAuth(nil),
+		},
+	}.Execute(tpmConn)
+	if err != nil {
+		return nil, fmt.Errorf("unseal CredRandom err: %w", err)
+	}
+
+	return unsealRsp.OutData.Buffer, nil
 }
 
 func mustRand(size int) []byte {

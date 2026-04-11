@@ -5,6 +5,7 @@ const (
 	CmdMakeCredential = 0x01
 	CmdGetAssertion   = 0x02
 	CmdGetInfo        = 0x04
+	CmdClientPIN      = 0x06
 )
 
 // CTAP2 status codes (first byte of CmdCbor response).
@@ -32,21 +33,34 @@ const (
 
 // MakeCredentialRequest is the CTAP2 0x01 authenticatorMakeCredential request.
 type MakeCredentialRequest struct {
-	ClientDataHash   []byte           `cbor:"1,keyasint"`
-	RP               RPEntity         `cbor:"2,keyasint"`
-	User             UserEntity       `cbor:"3,keyasint"`
-	PubKeyCredParams []CredParam      `cbor:"4,keyasint"`
-	ExcludeList      []CredDescriptor `cbor:"5,keyasint,omitempty"`
-	Options          *MakeCredOptions `cbor:"7,keyasint,omitempty"`
+	ClientDataHash   []byte                 `cbor:"1,keyasint"`
+	RP               RPEntity               `cbor:"2,keyasint"`
+	User             UserEntity             `cbor:"3,keyasint"`
+	PubKeyCredParams []CredParam            `cbor:"4,keyasint"`
+	ExcludeList      []CredDescriptor       `cbor:"5,keyasint,omitempty"`
+	Extensions       map[string]interface{} `cbor:"6,keyasint,omitempty"`
+	Options          *MakeCredOptions       `cbor:"7,keyasint,omitempty"`
 }
 
 // GetAssertionRequest is the CTAP2 0x02 authenticatorGetAssertion request.
 type GetAssertionRequest struct {
-	RPID           string            `cbor:"1,keyasint"`
-	ClientDataHash []byte            `cbor:"2,keyasint"`
-	AllowList      []CredDescriptor  `cbor:"3,keyasint,omitempty"`
-	Options        *GetAssertOptions `cbor:"5,keyasint,omitempty"`
+	RPID           string                 `cbor:"1,keyasint"`
+	ClientDataHash []byte                 `cbor:"2,keyasint"`
+	AllowList      []CredDescriptor       `cbor:"3,keyasint,omitempty"`
+	Extensions     map[string]interface{} `cbor:"4,keyasint,omitempty"`
+	Options        *GetAssertOptions      `cbor:"5,keyasint,omitempty"`
 }
+
+// ClientPINRequest is the CTAP2 0x06 authenticatorClientPIN request.
+type ClientPINRequest struct {
+	PinProtocol int `cbor:"1,keyasint"`
+	SubCommand  int `cbor:"2,keyasint"`
+}
+
+// ClientPIN subcommands.
+const (
+	ClientPINGetKeyAgreement = 0x02
+)
 
 type RPEntity struct {
 	ID   string `cbor:"id"`

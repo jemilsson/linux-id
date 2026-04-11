@@ -3,8 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -178,19 +181,27 @@ type server struct {
 	verifier UserVerifier   // CTAP2 — configured via --auth flag
 	signer   Signer
 	cs       *ctap2.CredStore
+	cfg      Config
+
+	// ECDH key pair for hmac-secret / clientPIN key agreement (pinProtocol 1).
+	// Generated once at startup, discarded on power-off.
+	ecdhPriv *ecdsa.PrivateKey
 }
 
 type Signer interface {
 	RegisterKey(applicationParam []byte) ([]byte, *big.Int, *big.Int, error)
 	SignASN1(keyHandle, applicationParam, digest []byte) ([]byte, error)
+	UnsealCredRandom(keyHandle, applicationParam []byte) ([]byte, error)
 	Counter() uint32
 }
 
 func newServer() *server {
 	pe := pinentry.New()
+	cfg := loadConfig()
 	s := server{
-		pe: pe,
-		cs: ctap2.NewCredStore(),
+		pe:  pe,
+		cs:  ctap2.NewCredStore(),
+		cfg: cfg,
 	}
 
 	var inner UserVerifier
@@ -201,6 +212,13 @@ func newServer() *server {
 		inner = &pinentryVerifier{pe: pe}
 	}
 	s.verifier = newCachingVerifier(inner)
+
+	// Generate ECDH key pair for hmac-secret / clientPIN key agreement.
+	ecdhKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		log.Fatalf("generate ECDH key: %s", err)
+	}
+	s.ecdhPriv = ecdhKey
 
 	if *backend == "tpm" {
 		signer, err := tpm.New(*device)
@@ -490,6 +508,8 @@ func (s *server) handleCtap2(ctx context.Context, token tokenResponder, evt fido
 		s.handleMakeCredential(ctx, token, evt, payload)
 	case ctap2.CmdGetAssertion:
 		s.handleGetAssertion(ctx, token, evt, payload)
+	case ctap2.CmdClientPIN:
+		s.handleClientPIN(ctx, token, evt, payload)
 	default:
 		log.Printf("unsupported CTAP2 cmd 0x%02x", cmd)
 		token.WriteCtap2Response(ctx, evt, ctap2.StatusNotAllowed, nil)
@@ -509,9 +529,11 @@ func (s *server) handleGetInfo(ctx context.Context, token tokenResponder, evt fi
 
 	response := map[int]interface{}{
 		1: []string{"FIDO_2_0"},
-		3: make([]byte, 16), // AAGUID: 16 zero bytes (uncertified)
+		3: make([]byte, 16),             // AAGUID: 16 zero bytes (uncertified)
 		4: options,
-		5: 1200, // maxMsgSize
+		5: 1200,                         // maxMsgSize
+		6: []string{"hmac-secret"},      // extensions
+		9: []int{1},                     // pinUvAuthProtocols
 	}
 	encoded, err := ctap2Enc.Marshal(response)
 	if err != nil {
@@ -644,11 +666,24 @@ func (s *server) handleMakeCredential(ctx context.Context, token tokenResponder,
 		return
 	}
 
-	// authenticatorData: rpIdHash(32) | flags(1) | signCount(4) | AAGUID(16) | credIdLen(2) | credId | coseKey
+	// authenticatorData: rpIdHash(32) | flags(1) | signCount(4) | AAGUID(16) | credIdLen(2) | credId | coseKey [| extensions]
 	// UV flag is set only when the verifier actually verified the user's identity.
 	authFlags := ctap2.AuthFlagUP | ctap2.AuthFlagAT | ctap2.AuthFlagBE
 	if s.verifier.PerformsUV() {
 		authFlags |= ctap2.AuthFlagUV
+	}
+
+	// Process hmac-secret extension in MakeCredential: confirm support.
+	hmacSecretRequested := false
+	if req.Extensions != nil {
+		if v, ok := req.Extensions["hmac-secret"]; ok {
+			if b, ok := v.(bool); ok && b {
+				hmacSecretRequested = true
+			}
+		}
+	}
+	if hmacSecretRequested {
+		authFlags |= ctap2.AuthFlagED
 	}
 
 	var authDataBuf bytes.Buffer
@@ -659,6 +694,17 @@ func (s *server) handleMakeCredential(ctx context.Context, token tokenResponder,
 	binary.Write(&authDataBuf, binary.BigEndian, uint16(len(keyHandle)))
 	authDataBuf.Write(keyHandle)
 	authDataBuf.Write(coseKeyBytes)
+
+	if hmacSecretRequested {
+		extData := map[string]bool{"hmac-secret": true}
+		extBytes, err := ctap2Enc.Marshal(extData)
+		if err != nil {
+			log.Printf("MakeCredential extension marshal err: %s", err)
+			token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
+			return
+		}
+		authDataBuf.Write(extBytes)
+	}
 	authDataBytes := authDataBuf.Bytes()
 
 	// Use "none" attestation: we have no hardware cert chain to present,
@@ -808,10 +854,36 @@ func (s *server) handleGetAssertion(ctx context.Context, token tokenResponder, e
 		}
 	}
 
+	// Process hmac-secret extension in GetAssertion.
+	var hmacSecretOutput []byte
+	if req.Extensions != nil {
+		if extRaw, ok := req.Extensions["hmac-secret"]; ok {
+			output, err := s.processHmacSecret(extRaw, keyHandle, rpIdHash[:])
+			if err != nil {
+				log.Printf("GetAssertion hmac-secret err: %s", err)
+				token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
+				return
+			}
+			hmacSecretOutput = output
+			authFlags |= ctap2.AuthFlagED
+		}
+	}
+
 	var authDataBuf bytes.Buffer
 	authDataBuf.Write(rpIdHash[:])
 	authDataBuf.WriteByte(authFlags)
 	binary.Write(&authDataBuf, binary.BigEndian, s.signer.Counter())
+
+	if hmacSecretOutput != nil {
+		extData := map[string][]byte{"hmac-secret": hmacSecretOutput}
+		extBytes, err := ctap2Enc.Marshal(extData)
+		if err != nil {
+			log.Printf("GetAssertion extension marshal err: %s", err)
+			token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
+			return
+		}
+		authDataBuf.Write(extBytes)
+	}
 	authDataBytes := authDataBuf.Bytes()
 
 	// Sign sha256(authData || clientDataHash) per WebAuthn §7.2.
@@ -850,4 +922,160 @@ func (s *server) handleGetAssertion(ctx context.Context, token tokenResponder, e
 	token.WriteCtap2Response(ctx, evt, ctap2.StatusOK, encoded)
 }
 
+// handleClientPIN implements authenticatorClientPIN (CTAP2 0x06).
+// Only getKeyAgreement (subCommand 0x02) is supported, for hmac-secret.
+func (s *server) handleClientPIN(ctx context.Context, token tokenResponder, evt fidohid.AuthEvent, payload []byte) {
+	log.Print("got Ctap2Cmd ClientPIN")
 
+	var req ctap2.ClientPINRequest
+	if err := cbor.Unmarshal(payload, &req); err != nil {
+		log.Printf("ClientPIN decode err: %s", err)
+		token.WriteCtap2Response(ctx, evt, ctap2.StatusInvalidCbor, nil)
+		return
+	}
+
+	if req.SubCommand != ctap2.ClientPINGetKeyAgreement {
+		log.Printf("ClientPIN: unsupported subCommand %d", req.SubCommand)
+		token.WriteCtap2Response(ctx, evt, ctap2.StatusNotAllowed, nil)
+		return
+	}
+
+	// Return the authenticator's ECDH public key in COSE_Key format.
+	xBytes := make([]byte, 32)
+	yBytes := make([]byte, 32)
+	s.ecdhPriv.PublicKey.X.FillBytes(xBytes)
+	s.ecdhPriv.PublicKey.Y.FillBytes(yBytes)
+
+	coseKey := map[int]interface{}{
+		1:  2,      // kty: EC2
+		3:  -25,    // alg: ECDH-ES+HKDF-256 (per CTAP2 spec)
+		-1: 1,      // crv: P-256
+		-2: xBytes, // x
+		-3: yBytes, // y
+	}
+
+	response := map[int]interface{}{
+		1: coseKey, // keyAgreement
+	}
+	encoded, err := ctap2Enc.Marshal(response)
+	if err != nil {
+		log.Printf("ClientPIN marshal err: %s", err)
+		token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
+		return
+	}
+	log.Print("ClientPIN: returning key agreement")
+	token.WriteCtap2Response(ctx, evt, ctap2.StatusOK, encoded)
+}
+
+// processHmacSecret handles the hmac-secret extension during GetAssertion.
+// It performs ECDH key agreement, verifies saltAuth, decrypts salts,
+// computes HMAC-SHA-256(CredRandom, salt), and returns the encrypted output.
+func (s *server) processHmacSecret(extRaw interface{}, keyHandle, rpIdHash []byte) ([]byte, error) {
+	// The extension value is a CBOR map: {1: keyAgreement, 2: saltEnc, 3: saltAuth}
+	// Due to CBOR decoding, it arrives as map[interface{}]interface{}.
+	extMap, ok := extRaw.(map[interface{}]interface{})
+	if !ok {
+		return nil, errors.New("hmac-secret: extension value is not a map")
+	}
+
+	// Extract platform's COSE key (keyAgreement, key 1).
+	keyAgreementRaw, ok := extMap[uint64(1)]
+	if !ok {
+		return nil, errors.New("hmac-secret: missing keyAgreement (key 1)")
+	}
+	platformKey, ok := keyAgreementRaw.(map[interface{}]interface{})
+	if !ok {
+		return nil, errors.New("hmac-secret: keyAgreement is not a map")
+	}
+
+	// Parse platform's P-256 public key from COSE format.
+	platformX, ok := coseGetBytes(platformKey, int64(-2))
+	if !ok || len(platformX) != 32 {
+		return nil, errors.New("hmac-secret: invalid platform key x coordinate")
+	}
+	platformY, ok := coseGetBytes(platformKey, int64(-3))
+	if !ok || len(platformY) != 32 {
+		return nil, errors.New("hmac-secret: invalid platform key y coordinate")
+	}
+
+	// Verify the point is on the curve.
+	curve := elliptic.P256()
+	pX := new(big.Int).SetBytes(platformX)
+	pY := new(big.Int).SetBytes(platformY)
+	if !curve.IsOnCurve(pX, pY) {
+		return nil, errors.New("hmac-secret: platform key not on P-256 curve")
+	}
+
+	// ECDH: shared point = platformPub * authenticatorPriv
+	sharedX, _ := curve.ScalarMult(pX, pY, s.ecdhPriv.D.Bytes())
+	// pinProtocol 1: sharedSecret = SHA-256(sharedPoint.x)
+	xBytes := make([]byte, 32)
+	sharedX.FillBytes(xBytes)
+	sharedSecret := sha256.Sum256(xBytes)
+
+	// Extract saltEnc (key 2) and saltAuth (key 3).
+	saltEnc, ok := coseGetBytes(extMap, uint64(2))
+	if !ok {
+		return nil, errors.New("hmac-secret: missing saltEnc (key 2)")
+	}
+	if len(saltEnc) != 32 && len(saltEnc) != 64 {
+		return nil, errors.New("hmac-secret: saltEnc must be 32 or 64 bytes")
+	}
+	saltAuth, ok := coseGetBytes(extMap, uint64(3))
+	if !ok {
+		return nil, errors.New("hmac-secret: missing saltAuth (key 3)")
+	}
+
+	// Verify saltAuth = left(HMAC-SHA-256(sharedSecret, saltEnc), 16).
+	mac := hmac.New(sha256.New, sharedSecret[:])
+	mac.Write(saltEnc)
+	expectedAuth := mac.Sum(nil)[:16]
+	if !hmac.Equal(saltAuth, expectedAuth) {
+		return nil, errors.New("hmac-secret: saltAuth verification failed")
+	}
+
+	// Decrypt salts: AES-256-CBC(sharedSecret, IV=zeros, saltEnc), no padding.
+	block, err := aes.NewCipher(sharedSecret[:])
+	if err != nil {
+		return nil, err
+	}
+	iv := make([]byte, aes.BlockSize)
+	decrypter := cipher.NewCBCDecrypter(block, iv)
+	salts := make([]byte, len(saltEnc))
+	decrypter.CryptBlocks(salts, saltEnc)
+
+	// Get CredRandom from signer (TPM-sealed or derived).
+	credRandom, err := s.signer.UnsealCredRandom(keyHandle, rpIdHash)
+	if err != nil {
+		return nil, err
+	}
+
+	// Compute HMAC-SHA-256(CredRandom, salt1) [|| HMAC-SHA-256(CredRandom, salt2)].
+	h1 := hmac.New(sha256.New, credRandom)
+	h1.Write(salts[:32])
+	output := h1.Sum(nil)
+
+	if len(salts) == 64 {
+		h2 := hmac.New(sha256.New, credRandom)
+		h2.Write(salts[32:64])
+		output = append(output, h2.Sum(nil)...)
+	}
+
+	// Encrypt output: AES-256-CBC(sharedSecret, IV=zeros, output), no padding.
+	encrypter := cipher.NewCBCEncrypter(block, iv)
+	encrypted := make([]byte, len(output))
+	encrypter.CryptBlocks(encrypted, output)
+
+	return encrypted, nil
+}
+
+// coseGetBytes extracts a byte slice from a CBOR map by key.
+// The key can be any type the CBOR decoder produces (int64, uint64, etc).
+func coseGetBytes(m map[interface{}]interface{}, key interface{}) ([]byte, bool) {
+	if v, ok := m[key]; ok {
+		if b, ok := v.([]byte); ok {
+			return b, true
+		}
+	}
+	return nil, false
+}

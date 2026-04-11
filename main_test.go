@@ -146,6 +146,11 @@ func (f *fakeSigner) SignASN1(keyHandle, _ []byte, digest []byte) ([]byte, error
 	return ecdsa.SignASN1(rand.Reader, priv, digest)
 }
 
+func (f *fakeSigner) UnsealCredRandom(keyHandle, _ []byte) ([]byte, error) {
+	h := sha256.Sum256(append(keyHandle, []byte("linux-id-hmac-secret")...))
+	return h[:], nil
+}
+
 func (f *fakeSigner) Counter() uint32 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -250,11 +255,16 @@ func (p *fakePinentry) release() {
 func newTestServer(t *testing.T, verifier UserVerifier, pe pinentryClient) *server {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
+	ecdhKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return &server{
 		pe:       pe,
 		verifier: verifier,
 		signer:   newFakeSigner(),
 		cs:       ctap2.NewCredStore(),
+		ecdhPriv: ecdhKey,
 	}
 }
 
@@ -593,8 +603,8 @@ func TestGetAssertion_AuthFlagsHonest(t *testing.T) {
 		performsUV  bool
 		expectFlags byte
 	}{
-		{"presence-only verifier", false, ctap2.AuthFlagUP},
-		{"uv-capable verifier", true, ctap2.AuthFlagUP | ctap2.AuthFlagUV},
+		{"presence-only verifier", false, ctap2.AuthFlagUP | ctap2.AuthFlagBE},
+		{"uv-capable verifier", true, ctap2.AuthFlagUP | ctap2.AuthFlagUV | ctap2.AuthFlagBE},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
