@@ -323,30 +323,25 @@ func (s *server) handleAuthenticate(parentCtx context.Context, token tokenRespon
 
 	if req.Authenticate.Ctrl == fidoauth.CtrlEnforeUserPresenceAndSign {
 
-		pinResultCh, err := s.pe.ConfirmPresence("FIDO Confirm Auth", req.Authenticate.ChallengeParam, req.Authenticate.ApplicationParam)
+		resultCh, err := s.verifier.VerifyUser("FIDO U2F Auth")
 
 		if err != nil {
-			log.Printf("pinentry err: %s", err)
+			log.Printf("U2F verifier err: %s", err)
 			token.WriteResponse(parentCtx, evt, nil, statuscode.ConditionsNotSatisfied)
-
 			return
 		}
 
-		childCtx, cancel := context.WithTimeout(parentCtx, 750*time.Millisecond)
+		childCtx, cancel := context.WithTimeout(parentCtx, 35*time.Second)
 		defer cancel()
 
 		select {
-		case result := <-pinResultCh:
+		case result := <-resultCh:
 			if result.OK {
 				userPresent = 0x01
 			} else {
 				if result.Error != nil {
-					log.Printf("Got pinentry result err: %s", result.Error)
+					log.Printf("U2F verifier result err: %s", result.Error)
 				}
-
-				// Got user cancelation, we want to propagate that so the browser gives up.
-				// This isn't normally supported by a key so there's no status code for this.
-				// WrongData seems like the least incorrect status code ¯\_(ツ)_/¯
 				err := token.WriteResponse(parentCtx, evt, nil, statuscode.WrongData)
 				if err != nil {
 					log.Printf("Write WrongData resp err: %s", err)
