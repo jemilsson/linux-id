@@ -73,5 +73,6 @@ type MakeCredOptions struct {
 }
 
 type GetAssertOptions struct {
-	UV bool `cbor:"uv,omitempty"`
+	UP *bool `cbor:"up,omitempty"`
+	UV bool  `cbor:"uv,omitempty"`
 }
