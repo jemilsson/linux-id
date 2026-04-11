@@ -26,6 +26,8 @@ const (
 	AuthFlagUP = byte(0x01) // User Present
 	AuthFlagUV = byte(0x04) // User Verified — only set when identity was verified (e.g. biometric)
 	AuthFlagAT = byte(0x40) // Attested Credential Data present (MakeCredential only)
+	AuthFlagBE = byte(0x08) // Backup Eligible — credential can be backed up
+	AuthFlagED = byte(0x80) // Extension Data present in authenticatorData
 )
 
 // MakeCredentialRequest is the CTAP2 0x01 authenticatorMakeCredential request.

@@ -646,7 +646,7 @@ func (s *server) handleMakeCredential(ctx context.Context, token tokenResponder,
 
 	// authenticatorData: rpIdHash(32) | flags(1) | signCount(4) | AAGUID(16) | credIdLen(2) | credId | coseKey
 	// UV flag is set only when the verifier actually verified the user's identity.
-	authFlags := ctap2.AuthFlagUP | ctap2.AuthFlagAT
+	authFlags := ctap2.AuthFlagUP | ctap2.AuthFlagAT | ctap2.AuthFlagBE
 	if s.verifier.PerformsUV() {
 		authFlags |= ctap2.AuthFlagUV
 	}
@@ -802,7 +802,7 @@ func (s *server) handleGetAssertion(ctx context.Context, token tokenResponder, e
 
 	var authFlags byte
 	if upRequired {
-		authFlags = ctap2.AuthFlagUP
+		authFlags = ctap2.AuthFlagUP | ctap2.AuthFlagBE
 		if s.verifier.PerformsUV() {
 			authFlags |= ctap2.AuthFlagUV
 		}
