@@ -603,8 +603,8 @@ func TestGetAssertion_AuthFlagsHonest(t *testing.T) {
 		performsUV  bool
 		expectFlags byte
 	}{
-		{"presence-only verifier", false, ctap2.AuthFlagUP | ctap2.AuthFlagBE},
-		{"uv-capable verifier", true, ctap2.AuthFlagUP | ctap2.AuthFlagUV | ctap2.AuthFlagBE},
+		{"presence-only verifier", false, ctap2.AuthFlagUP},
+		{"uv-capable verifier", true, ctap2.AuthFlagUP | ctap2.AuthFlagUV},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

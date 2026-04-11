@@ -668,9 +668,12 @@ func (s *server) handleMakeCredential(ctx context.Context, token tokenResponder,
 
 	// authenticatorData: rpIdHash(32) | flags(1) | signCount(4) | AAGUID(16) | credIdLen(2) | credId | coseKey [| extensions]
 	// UV flag is set only when the verifier actually verified the user's identity.
-	authFlags := ctap2.AuthFlagUP | ctap2.AuthFlagAT | ctap2.AuthFlagBE
+	authFlags := ctap2.AuthFlagUP | ctap2.AuthFlagAT
 	if s.verifier.PerformsUV() {
 		authFlags |= ctap2.AuthFlagUV
+	}
+	if s.cfg.BackupEligible(req.RP.ID) {
+		authFlags |= ctap2.AuthFlagBE
 	}
 
 	// Process hmac-secret extension in MakeCredential: confirm support.
@@ -848,9 +851,12 @@ func (s *server) handleGetAssertion(ctx context.Context, token tokenResponder, e
 
 	var authFlags byte
 	if upRequired {
-		authFlags = ctap2.AuthFlagUP | ctap2.AuthFlagBE
+		authFlags = ctap2.AuthFlagUP
 		if s.verifier.PerformsUV() {
 			authFlags |= ctap2.AuthFlagUV
+		}
+		if s.cfg.BackupEligible(req.RPID) {
+			authFlags |= ctap2.AuthFlagBE
 		}
 	}
 
