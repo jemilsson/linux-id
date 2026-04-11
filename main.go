@@ -572,8 +572,25 @@ func (s *server) handleMakeCredential(ctx context.Context, token tokenResponder,
 	}
 	childCtx, cancel := context.WithTimeout(ctx, 35*time.Second)
 	defer cancel()
+	keepaliveDone := make(chan struct{})
+	keepaliveStopped := make(chan struct{})
+	go func() {
+		defer close(keepaliveStopped)
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				token.SendKeepalive(evt, 0x02)
+			case <-keepaliveDone:
+				return
+			}
+		}
+	}()
 	select {
 	case result := <-resultCh:
+		close(keepaliveDone)
+		<-keepaliveStopped
 		if !result.OK {
 			if result.Error != nil {
 				log.Printf("MakeCredential verifier result err: %s", result.Error)
@@ -582,6 +599,8 @@ func (s *server) handleMakeCredential(ctx context.Context, token tokenResponder,
 			return
 		}
 	case <-childCtx.Done():
+		close(keepaliveDone)
+		<-keepaliveStopped
 		token.WriteCtap2Response(ctx, evt, ctap2.StatusUserActionTimeout, nil)
 		return
 	}
