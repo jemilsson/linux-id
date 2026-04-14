@@ -191,7 +191,7 @@ in
     # uaccess covers seat-attached sessions; GROUP+MODE covers system services.
     services.udev.extraRules = lib.mkIf cfg.udev.enable ''
       KERNEL=="uhid",      SUBSYSTEM=="misc",   TAG+="uaccess", GROUP="tss", MODE="0660"
-      KERNEL=="hidraw[0-9]*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="15d9", TAG+="uaccess", GROUP="tss", MODE="0660"
+      KERNEL=="hidraw[0-9]*", SUBSYSTEM=="hidraw", KERNELS=="0003:15D9:0A37.*", TAG+="uaccess", GROUP="tss", MODE="0660"
       KERNEL=="tpmrm0",    SUBSYSTEM=="tpmrm",  TAG+="uaccess"
     '';
 
