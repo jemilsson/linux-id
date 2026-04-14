@@ -188,8 +188,9 @@ in
       }) enabledInstances;
 
     # Udev rules: grant access to uhid and tpmrm0.
+    # uaccess covers seat-attached sessions; GROUP+MODE covers system services.
     services.udev.extraRules = lib.mkIf cfg.udev.enable ''
-      KERNEL=="uhid",   SUBSYSTEM=="misc",  TAG+="uaccess"
+      KERNEL=="uhid",   SUBSYSTEM=="misc",  TAG+="uaccess", GROUP="tss", MODE="0660"
       KERNEL=="tpmrm0", SUBSYSTEM=="tpmrm", TAG+="uaccess"
     '';
 
