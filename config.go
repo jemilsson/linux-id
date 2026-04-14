@@ -15,17 +15,27 @@ type SiteConfig struct {
 
 // Config is loaded from ~/.config/linux-id/config.json.
 type Config struct {
+	// AutoApprove globally disables all user verification prompts.
+	// Useful for headless/agent environments with no human operator.
+	AutoApproveAll bool `json:"auto_approve_all"`
+
 	Sites map[string]SiteConfig `json:"sites"`
 }
 
-func loadConfig() Config {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return Config{}
+func loadConfig(override string) Config {
+	path := override
+	if path == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return Config{}
+		}
+		path = filepath.Join(home, ".config", "linux-id", "config.json")
 	}
-	path := filepath.Join(home, ".config", "linux-id", "config.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if override != "" {
+			log.Printf("config: cannot read %s: %s", path, err)
+		}
 		return Config{}
 	}
 	var cfg Config
@@ -49,8 +59,11 @@ func (c *Config) BackupEligible(rpId string) bool {
 }
 
 // AutoApprove returns true if the given rpId has auto_approve set in config,
-// allowing operations to proceed without user verification.
+// or if global auto_approve_all is enabled.
 func (c *Config) AutoApprove(rpId string) bool {
+	if c.AutoApproveAll {
+		return true
+	}
 	if c.Sites == nil {
 		return false
 	}

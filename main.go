@@ -35,6 +35,8 @@ import (
 var backend = flag.String("backend", "tpm", "tpm|memory")
 var device = flag.String("device", "/dev/tpmrm0", "TPM device path")
 var auth = flag.String("auth", "pinentry", "pinentry|fprintd — pinentry confirms presence (UP only); fprintd verifies identity via fingerprint (UP+UV)")
+var deviceName = flag.String("name", "linux-id", "UHID device name (use distinct names when running multiple instances)")
+var configPath = flag.String("config", "", "path to config.json (default: ~/.config/linux-id/config.json)")
 
 // ctap2Enc is the CTAP2 Canonical CBOR encoder. Per CTAP §6, all CTAP2
 // messages must use canonical encoding (sorted keys, shortest-form integers,
@@ -177,6 +179,18 @@ func (v *cachingVerifier) VerifyUser(prompt string) (<-chan VerifyResult, error)
 
 func (v *cachingVerifier) PerformsUV() bool { return v.inner.PerformsUV() }
 
+// autoApproveVerifier always grants verification without prompting.
+// Used when global auto_approve_all is set for headless/agent operation.
+type autoApproveVerifier struct{}
+
+func (v *autoApproveVerifier) VerifyUser(prompt string) (<-chan VerifyResult, error) {
+	ch := make(chan VerifyResult, 1)
+	ch <- VerifyResult{OK: true}
+	return ch, nil
+}
+
+func (v *autoApproveVerifier) PerformsUV() bool { return false }
+
 // pinentryClient is the subset of *pinentry.Pinentry that the U2F handlers
 // use. Exists so handleRegister/handleAuthenticate can be unit-tested with a fake.
 type pinentryClient interface {
@@ -206,7 +220,7 @@ type Signer interface {
 
 func newServer() *server {
 	pe := pinentry.New()
-	cfg := loadConfig()
+	cfg := loadConfig(*configPath)
 	s := server{
 		pe:  pe,
 		cs:  ctap2.NewCredStore(),
@@ -214,14 +228,19 @@ func newServer() *server {
 		led: powerled.New(),
 	}
 
-	var inner UserVerifier
-	switch *auth {
-	case "fprintd":
-		inner = &fprintdVerifier{fp: fprintd.New()}
-	default:
-		inner = &pinentryVerifier{pe: pe}
+	if cfg.AutoApproveAll {
+		log.Print("config: auto_approve_all enabled, all verification prompts will be skipped")
+		s.verifier = &autoApproveVerifier{}
+	} else {
+		var inner UserVerifier
+		switch *auth {
+		case "fprintd":
+			inner = &fprintdVerifier{fp: fprintd.New()}
+		default:
+			inner = &pinentryVerifier{pe: pe}
+		}
+		s.verifier = newCachingVerifier(inner)
 	}
-	s.verifier = newCachingVerifier(inner)
 
 	// Generate ECDH key pair for hmac-secret / clientPIN key agreement.
 	ecdhKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -247,7 +266,7 @@ func newServer() *server {
 }
 
 func (s *server) run() {
-	log.Printf("Starting linux-id server (auth=%s)", *auth)
+	log.Printf("Starting linux-id server (name=%s, auth=%s)", *deviceName, *auth)
 
 	ctx := context.Background()
 
@@ -255,7 +274,7 @@ func (s *server) run() {
 		log.Printf("warning: no gui pinentry binary detected in PATH. linux-id may not work correctly without a gui based pinentry")
 	}
 
-	token, err := fidohid.New(ctx, "linux-id")
+	token, err := fidohid.New(ctx, *deviceName)
 	if err != nil {
 		log.Fatalf("create fido hid error: %s", err)
 	}
@@ -428,6 +447,12 @@ func (s *server) handleRegister(parentCtx context.Context, token tokenResponder,
 	ctx, cancel := context.WithTimeout(parentCtx, 750*time.Millisecond)
 	defer cancel()
 	req := evt.Req
+
+	if s.cfg.AutoApproveAll {
+		log.Print("U2F Register: auto-approving (auto_approve_all)")
+		s.registerSite(parentCtx, token, evt)
+		return
+	}
 
 	pinResultCh, err := s.pe.ConfirmPresence("FIDO Confirm Register", req.Register.ChallengeParam, req.Register.ApplicationParam)
 
