@@ -202,6 +202,7 @@ BindReadOnlyPaths=%T/.X11-unix
 BindPaths=%E
 NoNewPrivileges=true
 ProtectSystem=strict
+ReadWritePaths=/sys/class/leds
 ProtectHome=tmpfs
 PrivateTmp=true
 PrivateNetwork=true
@@ -235,11 +236,14 @@ EOF
 
 KERNEL=="uhid",   SUBSYSTEM=="misc",  TAG+="uaccess"
 KERNEL=="tpmrm0", SUBSYSTEM=="tpmrm", TAG+="uaccess"
+
+# Allow user services to control the ThinkPad power LED for FIDO presence feedback
+SUBSYSTEM=="leds", KERNEL=="tpacpi::power", RUN+="/run/current-system/sw/bin/chmod 0666 %S%p/brightness %S%p/trigger"
 EOF
     handle "Failed to install udev rules"
 
     sudo udevadm control --reload-rules
-    sudo udevadm trigger --subsystem-match=misc --subsystem-match=tpmrm
+    sudo udevadm trigger --subsystem-match=misc --subsystem-match=tpmrm --subsystem-match=leds
 }
 
 function enable_user_service() {

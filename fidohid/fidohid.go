@@ -213,6 +213,10 @@ func (c CmdType) String() string {
 		return "CmdError"
 	case CmdCbor:
 		return "CmdCbor"
+	case CmdCancel:
+		return "CmdCancel"
+	case CmdKeepalive:
+		return "CmdKeepalive"
 	}
 
 	if c >= vendorSpecificFirstCmd && c <= vendorSpecificLastCmd {
@@ -472,7 +476,7 @@ func (t *SoftToken) SendKeepalive(evt AuthEvent, status byte) error {
 }
 
 func writeRespose(d *uhid.Device, chanID uint32, cmd CmdType, data []byte, status uint16) error {
-	log.Printf("writeRespose: cmd=0x%02x chanID=0x%08x dataLen=%d status=0x%04x", cmd, chanID, len(data), status)
+	log.Printf("writeRespose: cmd=%s(0x%02x) chanID=0x%08x dataLen=%d status=0x%04x", cmd, uint8(cmd), chanID, len(data), status)
 
 	initial := true
 	pktSize := initialPacketDataLen

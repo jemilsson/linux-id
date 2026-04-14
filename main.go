@@ -62,6 +62,12 @@ func main() {
 	s.run()
 }
 
+// minVerifyDuration prevents tight retry loops when the verifier fails
+// instantly (e.g. fingerprint reader disconnected). If verification fails
+// faster than this, the handler waits before responding so the client
+// cannot retry at full speed.
+const minVerifyDuration = 2 * time.Second
+
 type VerifyFailureReason int
 
 const (
@@ -346,6 +352,7 @@ func (s *server) handleAuthenticate(parentCtx context.Context, token tokenRespon
 
 	if req.Authenticate.Ctrl == fidoauth.CtrlEnforeUserPresenceAndSign {
 
+		verifyStart := time.Now()
 		resultCh, err := s.verifier.VerifyUser("FIDO U2F Auth")
 
 		if err != nil {
@@ -366,6 +373,9 @@ func (s *server) handleAuthenticate(parentCtx context.Context, token tokenRespon
 			} else {
 				if result.Error != nil {
 					log.Printf("U2F verifier result err: %s", result.Error)
+				}
+				if wait := minVerifyDuration - time.Since(verifyStart); wait > 0 {
+					time.Sleep(wait)
 				}
 				err := token.WriteResponse(parentCtx, evt, nil, statuscode.WrongData)
 				if err != nil {
@@ -538,9 +548,10 @@ func (s *server) handleGetInfo(ctx context.Context, token tokenResponder, evt fi
 	log.Print("got Ctap2Cmd GetInfo")
 
 	options := map[string]bool{
-		"rk": true,
-		"up": true,
-		"uv": s.verifier.PerformsUV(),
+		"rk":        true,
+		"up":        true,
+		"uv":        s.verifier.PerformsUV(),
+		"clientPin": false,
 	}
 
 	response := map[int]interface{}{
@@ -606,6 +617,7 @@ func (s *server) handleMakeCredential(ctx context.Context, token tokenResponder,
 	if s.cfg.AutoApprove(req.RP.ID) {
 		log.Printf("MakeCredential: auto-approving for rp=%s", req.RP.ID)
 	} else {
+		verifyStart := time.Now()
 		resultCh, err := s.verifier.VerifyUser("FIDO2 Register: " + req.RP.ID)
 		if err != nil {
 			log.Printf("MakeCredential verifier err: %s", err)
@@ -638,6 +650,9 @@ func (s *server) handleMakeCredential(ctx context.Context, token tokenResponder,
 			if !result.OK {
 				if result.Error != nil {
 					log.Printf("MakeCredential verifier result err: %s", result.Error)
+				}
+				if wait := minVerifyDuration - time.Since(verifyStart); wait > 0 {
+					time.Sleep(wait)
 				}
 				token.WriteCtap2Response(ctx, evt, statusForFailure(result), nil)
 				return
@@ -833,6 +848,7 @@ func (s *server) handleGetAssertion(ctx context.Context, token tokenResponder, e
 	if upRequired && s.cfg.AutoApprove(req.RPID) {
 		log.Printf("GetAssertion: auto-approving for rp=%s", req.RPID)
 	} else if upRequired {
+		verifyStart := time.Now()
 		resultCh, err := s.verifier.VerifyUser("FIDO2 Authenticate: " + req.RPID)
 		if err != nil {
 			log.Printf("GetAssertion verifier err: %s", err)
@@ -865,6 +881,9 @@ func (s *server) handleGetAssertion(ctx context.Context, token tokenResponder, e
 			if !result.OK {
 				if result.Error != nil {
 					log.Printf("GetAssertion verifier result err: %s", result.Error)
+				}
+				if wait := minVerifyDuration - time.Since(verifyStart); wait > 0 {
+					time.Sleep(wait)
 				}
 				token.WriteCtap2Response(ctx, evt, statusForFailure(result), nil)
 				return
