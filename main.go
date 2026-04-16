@@ -146,7 +146,11 @@ type cachingVerifier struct {
 }
 
 func newCachingVerifier(inner UserVerifier) *cachingVerifier {
-	return &cachingVerifier{inner: inner, ttl: uvCacheTTL, now: time.Now}
+	return newCachingVerifierWithTTL(inner, uvCacheTTL)
+}
+
+func newCachingVerifierWithTTL(inner UserVerifier, ttl time.Duration) *cachingVerifier {
+	return &cachingVerifier{inner: inner, ttl: ttl, now: time.Now}
 }
 
 func (v *cachingVerifier) VerifyUser(prompt string) (<-chan VerifyResult, error) {
@@ -202,6 +206,7 @@ type server struct {
 	verifier UserVerifier   // CTAP2 — configured via --auth flag
 	signer   Signer
 	cs       *ctap2.CredStore
+	known    *ctap2.KnownHandles
 	cfg      Config
 
 	// ECDH key pair for hmac-secret / clientPIN key agreement (pinProtocol 1).
@@ -222,10 +227,11 @@ func newServer() *server {
 	pe := pinentry.New()
 	cfg := loadConfig(*configPath)
 	s := server{
-		pe:  pe,
-		cs:  ctap2.NewCredStore(),
-		cfg: cfg,
-		led: powerled.New(),
+		pe:    pe,
+		cs:    ctap2.NewCredStore(),
+		known: ctap2.NewKnownHandles(),
+		cfg:   cfg,
+		led:   powerled.New(),
 	}
 
 	if cfg.AutoApproveAll {
@@ -239,7 +245,12 @@ func newServer() *server {
 		default:
 			inner = &pinentryVerifier{pe: pe}
 		}
-		s.verifier = newCachingVerifier(inner)
+		if ttl := cfg.UVCacheTTL(); ttl > 0 {
+			s.verifier = newCachingVerifierWithTTL(inner, ttl)
+		} else {
+			log.Print("config: uv_cache_ttl_seconds=0, every sign will prompt fresh")
+			s.verifier = inner
+		}
 	}
 
 	// Generate ECDH key pair for hmac-secret / clientPIN key agreement.
@@ -840,18 +851,37 @@ func (s *server) handleGetAssertion(ctx context.Context, token tokenResponder, e
 	var keyHandle []byte
 	var storedCred *ctap2.StoredCredential
 	if len(req.AllowList) > 0 {
-		// Validate the key handle before prompting the user.
-		dummySig := sha256.Sum256([]byte("meticulously-Bacardi"))
-		for _, cred := range req.AllowList {
-			if _, err := s.signer.SignASN1(cred.ID, rpIdHash[:], dummySig[:]); err == nil {
-				keyHandle = cred.ID
-				break
+		// Pick one credential from the allowList. Strategy:
+		//   1. Exactly one entry: use it directly; the real sign catches
+		//      malformed or foreign handles after user verification.
+		//   2. Multiple entries: prefer a handle we have previously signed
+		//      with (cached in known-handles.json). Otherwise fall back to
+		//      a dummy-sign probe to find which handle actually belongs to
+		//      this TPM, avoiding a wasted fingerprint scan on a handle
+		//      that would fail the real sign.
+		if len(req.AllowList) == 1 {
+			keyHandle = req.AllowList[0].ID
+		} else {
+			for _, cred := range req.AllowList {
+				if s.known.Contains(cred.ID) {
+					keyHandle = cred.ID
+					break
+				}
 			}
-		}
-		if keyHandle == nil {
-			log.Printf("GetAssertion: no valid key handle in allowList for rp=%s", req.RPID)
-			token.WriteCtap2Response(ctx, evt, ctap2.StatusNoCredentials, nil)
-			return
+			if keyHandle == nil {
+				dummySig := sha256.Sum256([]byte("meticulously-Bacardi"))
+				for _, cred := range req.AllowList {
+					if _, err := s.signer.SignASN1(cred.ID, rpIdHash[:], dummySig[:]); err == nil {
+						keyHandle = cred.ID
+						break
+					}
+				}
+				if keyHandle == nil {
+					log.Printf("GetAssertion: no valid key handle in allowList for rp=%s", req.RPID)
+					token.WriteCtap2Response(ctx, evt, ctap2.StatusNoCredentials, nil)
+					return
+				}
+			}
 		}
 	} else {
 		creds, err := s.cs.FindByRPID(rpIdHash[:])
@@ -924,8 +954,13 @@ func (s *server) handleGetAssertion(ctx context.Context, token tokenResponder, e
 		log.Printf("GetAssertion: up=false probe, skipping verification for rp=%s", req.RPID)
 	}
 
-	s.led.Start(100 * time.Millisecond)
-	defer s.led.Stop()
+	// up=false probes are silent credential-existence checks; don't blink
+	// the LED for them, it's confusing to see a flash before the real
+	// user-presence prompt.
+	if upRequired {
+		s.led.Start(100 * time.Millisecond)
+		defer s.led.Stop()
+	}
 
 	var authFlags byte
 	if upRequired {
@@ -982,6 +1017,7 @@ func (s *server) handleGetAssertion(ctx context.Context, token tokenResponder, e
 		token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
 		return
 	}
+	s.known.Add(keyHandle)
 
 	response := map[int]interface{}{
 		1: map[string]interface{}{"type": "public-key", "id": keyHandle},

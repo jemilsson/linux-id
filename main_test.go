@@ -1683,9 +1683,16 @@ func TestGetAssertion_NoMatchingCredentialInAllowList(t *testing.T) {
 	verifier := &fakeVerifier{nextResult: VerifyResult{OK: true}}
 	s := newTestServer(t, verifier, &fakePinentry{})
 
+	// Multi-entry allowList with only bogus credentials triggers the
+	// dummy-sign probe, which should return StatusNoCredentials when none
+	// match. Single-entry allowLists no longer prevalidate; they go
+	// straight to the real sign which yields StatusOperationDenied instead.
 	resp := &fakeResponder{}
 	payload := makeAssertionCBOR(t, "example.com",
-		[]ctap2.CredDescriptor{{Type: "public-key", ID: []byte("totally-bogus")}},
+		[]ctap2.CredDescriptor{
+			{Type: "public-key", ID: []byte("totally-bogus-1")},
+			{Type: "public-key", ID: []byte("totally-bogus-2")},
+		},
 		nil)
 	s.handleGetAssertion(context.Background(), resp, fidohid.AuthEvent{}, payload)
 	if got := resp.lastCtap2().status; got != ctap2.StatusNoCredentials {

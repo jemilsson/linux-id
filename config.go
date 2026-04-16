@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // SiteConfig holds per-site flag overrides.
@@ -19,7 +20,28 @@ type Config struct {
 	// Useful for headless/agent environments with no human operator.
 	AutoApproveAll bool `json:"auto_approve_all"`
 
+	// UVCacheTTLSeconds controls how long a successful user verification
+	// is reused for subsequent sign operations. Pointer to distinguish
+	// "unset" (use DefaultUVCacheTTLSeconds) from "set to 0" (disable
+	// caching entirely so every sign prompts fresh).
+	UVCacheTTLSeconds *int `json:"uv_cache_ttl_seconds,omitempty"`
+
 	Sites map[string]SiteConfig `json:"sites"`
+}
+
+// DefaultUVCacheTTLSeconds is used when UVCacheTTLSeconds is unset in config.
+const DefaultUVCacheTTLSeconds = 5
+
+// UVCacheTTL returns the configured cache duration. Zero disables caching.
+func (c *Config) UVCacheTTL() time.Duration {
+	secs := DefaultUVCacheTTLSeconds
+	if c.UVCacheTTLSeconds != nil {
+		secs = *c.UVCacheTTLSeconds
+	}
+	if secs <= 0 {
+		return 0
+	}
+	return time.Duration(secs) * time.Second
 }
 
 func loadConfig(override string) Config {
