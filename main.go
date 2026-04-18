@@ -386,7 +386,7 @@ func (s *server) handleAuthenticate(parentCtx context.Context, token tokenRespon
 	if req.Authenticate.Ctrl == fidoauth.CtrlEnforeUserPresenceAndSign {
 
 		id := signid.From(req.Authenticate.ChallengeParam[:])
-		log.Printf("U2F Auth: prompting id=%s", id)
+		log.Printf("U2F Auth: prompting id=%s hash=%s", id, signid.Full(req.Authenticate.ChallengeParam[:]))
 		notify.Send(
 			fmt.Sprintf("linux-id (%s): U2F auth [id %s]", *deviceName, id),
 			"U2F authentication request",
@@ -475,7 +475,7 @@ func (s *server) handleRegister(parentCtx context.Context, token tokenResponder,
 	}
 
 	id := signid.From(req.Register.ChallengeParam[:])
-	log.Printf("U2F Register: prompting id=%s", id)
+	log.Printf("U2F Register: prompting id=%s hash=%s", id, signid.Full(req.Register.ChallengeParam[:]))
 	notify.Send(
 		fmt.Sprintf("linux-id (%s): U2F register [id %s]", *deviceName, id),
 		"U2F registration request",
@@ -669,7 +669,7 @@ func (s *server) handleMakeCredential(ctx context.Context, token tokenResponder,
 		log.Printf("MakeCredential: auto-approving for rp=%s", req.RP.ID)
 	} else {
 		id := signid.From(req.ClientDataHash)
-		log.Printf("MakeCredential: prompting for rp=%s id=%s", req.RP.ID, id)
+		log.Printf("MakeCredential: prompting for rp=%s id=%s hash=%s", req.RP.ID, id, signid.Full(req.ClientDataHash))
 		notify.Send(
 			fmt.Sprintf("linux-id (%s): register [id %s]", *deviceName, id),
 			fmt.Sprintf("RPID: %s", req.RP.ID),
@@ -925,7 +925,7 @@ func (s *server) handleGetAssertion(ctx context.Context, token tokenResponder, e
 		log.Printf("GetAssertion: auto-approving for rp=%s", req.RPID)
 	} else if upRequired {
 		id := signid.From(req.ClientDataHash)
-		log.Printf("GetAssertion: prompting for rp=%s id=%s", req.RPID, id)
+		log.Printf("GetAssertion: prompting for rp=%s id=%s hash=%s", req.RPID, id, signid.Full(req.ClientDataHash))
 		notify.Send(
 			fmt.Sprintf("linux-id (%s): sign [id %s]", *deviceName, id),
 			fmt.Sprintf("RPID: %s", req.RPID),
