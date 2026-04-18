@@ -13,6 +13,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"math/big"
 	"sync"
@@ -24,6 +25,8 @@ import (
 	"github.com/matejsmycka/linux-id/fidoauth"
 	"github.com/matejsmycka/linux-id/fidohid"
 	"github.com/matejsmycka/linux-id/fprintd"
+	"github.com/matejsmycka/linux-id/internal/notify"
+	"github.com/matejsmycka/linux-id/internal/signid"
 	"github.com/matejsmycka/linux-id/memory"
 	"github.com/matejsmycka/linux-id/pinentry"
 	"github.com/matejsmycka/linux-id/powerled"
@@ -382,8 +385,14 @@ func (s *server) handleAuthenticate(parentCtx context.Context, token tokenRespon
 
 	if req.Authenticate.Ctrl == fidoauth.CtrlEnforeUserPresenceAndSign {
 
+		id := signid.From(req.Authenticate.ChallengeParam[:])
+		log.Printf("U2F Auth: prompting id=%s", id)
+		notify.Send(
+			fmt.Sprintf("linux-id (%s): U2F auth [id %s]", *deviceName, id),
+			"U2F authentication request",
+		)
 		verifyStart := time.Now()
-		resultCh, err := s.verifier.VerifyUser("FIDO U2F Auth")
+		resultCh, err := s.verifier.VerifyUser(fmt.Sprintf("FIDO U2F Auth [id %s]", id))
 
 		if err != nil {
 			log.Printf("U2F verifier err: %s", err)
@@ -465,7 +474,13 @@ func (s *server) handleRegister(parentCtx context.Context, token tokenResponder,
 		return
 	}
 
-	pinResultCh, err := s.pe.ConfirmPresence("FIDO Confirm Register", req.Register.ChallengeParam, req.Register.ApplicationParam)
+	id := signid.From(req.Register.ChallengeParam[:])
+	log.Printf("U2F Register: prompting id=%s", id)
+	notify.Send(
+		fmt.Sprintf("linux-id (%s): U2F register [id %s]", *deviceName, id),
+		"U2F registration request",
+	)
+	pinResultCh, err := s.pe.ConfirmPresence(fmt.Sprintf("FIDO Confirm Register [id %s]", id), req.Register.ChallengeParam, req.Register.ApplicationParam)
 
 	if err != nil {
 		log.Printf("pinentry err: %s", err)
@@ -653,8 +668,14 @@ func (s *server) handleMakeCredential(ctx context.Context, token tokenResponder,
 	if s.cfg.AutoApprove(req.RP.ID) {
 		log.Printf("MakeCredential: auto-approving for rp=%s", req.RP.ID)
 	} else {
+		id := signid.From(req.ClientDataHash)
+		log.Printf("MakeCredential: prompting for rp=%s id=%s", req.RP.ID, id)
+		notify.Send(
+			fmt.Sprintf("linux-id (%s): register [id %s]", *deviceName, id),
+			fmt.Sprintf("RPID: %s", req.RP.ID),
+		)
 		verifyStart := time.Now()
-		resultCh, err := s.verifier.VerifyUser("FIDO2 Register: " + req.RP.ID)
+		resultCh, err := s.verifier.VerifyUser(fmt.Sprintf("FIDO2 Register: %s [id %s]", req.RP.ID, id))
 		if err != nil {
 			log.Printf("MakeCredential verifier err: %s", err)
 			token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
@@ -903,8 +924,14 @@ func (s *server) handleGetAssertion(ctx context.Context, token tokenResponder, e
 	if upRequired && s.cfg.AutoApprove(req.RPID) {
 		log.Printf("GetAssertion: auto-approving for rp=%s", req.RPID)
 	} else if upRequired {
+		id := signid.From(req.ClientDataHash)
+		log.Printf("GetAssertion: prompting for rp=%s id=%s", req.RPID, id)
+		notify.Send(
+			fmt.Sprintf("linux-id (%s): sign [id %s]", *deviceName, id),
+			fmt.Sprintf("RPID: %s", req.RPID),
+		)
 		verifyStart := time.Now()
-		resultCh, err := s.verifier.VerifyUser("FIDO2 Authenticate: " + req.RPID)
+		resultCh, err := s.verifier.VerifyUser(fmt.Sprintf("FIDO2 Authenticate: %s [id %s]", req.RPID, id))
 		if err != nil {
 			log.Printf("GetAssertion verifier err: %s", err)
 			token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
