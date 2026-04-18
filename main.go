@@ -388,8 +388,8 @@ func (s *server) handleAuthenticate(parentCtx context.Context, token tokenRespon
 		id := signid.From(req.Authenticate.ChallengeParam[:])
 		log.Printf("U2F Auth: prompting id=%s hash=%s", id, signid.Full(req.Authenticate.ChallengeParam[:]))
 		n := notify.Send(
-			fmt.Sprintf("linux-id (%s): U2F auth", *deviceName),
-			fmt.Sprintf("id:   %s", id),
+			"Signature request",
+			fmt.Sprintf("id:   %s\nfrom: linux-id (%s) U2F auth", id, *deviceName),
 		)
 		defer n.Close()
 		verifyStart := time.Now()
@@ -478,8 +478,8 @@ func (s *server) handleRegister(parentCtx context.Context, token tokenResponder,
 	id := signid.From(req.Register.ChallengeParam[:])
 	log.Printf("U2F Register: prompting id=%s hash=%s", id, signid.Full(req.Register.ChallengeParam[:]))
 	n := notify.Send(
-		fmt.Sprintf("linux-id (%s): U2F register", *deviceName),
-		fmt.Sprintf("id:   %s", id),
+		"Registration request",
+		fmt.Sprintf("id:   %s\nfrom: linux-id (%s) U2F register", id, *deviceName),
 	)
 	defer n.Close()
 	pinResultCh, err := s.pe.ConfirmPresence(fmt.Sprintf("FIDO Confirm Register [id %s]", id), req.Register.ChallengeParam, req.Register.ApplicationParam)
@@ -673,8 +673,8 @@ func (s *server) handleMakeCredential(ctx context.Context, token tokenResponder,
 		id := signid.From(req.ClientDataHash)
 		log.Printf("MakeCredential: prompting for rp=%s id=%s hash=%s", req.RP.ID, id, signid.Full(req.ClientDataHash))
 		n := notify.Send(
-			fmt.Sprintf("linux-id (%s): register", *deviceName),
-			fmt.Sprintf("id:   %s\nrpid: %s", id, req.RP.ID),
+			"Registration request",
+			fmt.Sprintf("id:   %s\nfrom: linux-id (%s)\nrpid: %s", id, *deviceName, req.RP.ID),
 		)
 		defer n.Close()
 		verifyStart := time.Now()
@@ -930,8 +930,8 @@ func (s *server) handleGetAssertion(ctx context.Context, token tokenResponder, e
 		id := signid.From(req.ClientDataHash)
 		log.Printf("GetAssertion: prompting for rp=%s id=%s hash=%s", req.RPID, id, signid.Full(req.ClientDataHash))
 		n := notify.Send(
-			fmt.Sprintf("linux-id (%s): sign", *deviceName),
-			fmt.Sprintf("id:   %s\nrpid: %s", id, req.RPID),
+			"Signature request",
+			fmt.Sprintf("id:   %s\nfrom: linux-id (%s)\nrpid: %s", id, *deviceName, req.RPID),
 		)
 		defer n.Close()
 		verifyStart := time.Now()
