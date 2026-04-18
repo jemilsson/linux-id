@@ -88,7 +88,7 @@ type fakeVerifier struct {
 	blockUntil chan struct{}
 }
 
-func (v *fakeVerifier) VerifyUser(prompt string) (<-chan VerifyResult, error) {
+func (v *fakeVerifier) VerifyUser(prompt string, _ func(string)) (<-chan VerifyResult, error) {
 	v.callCount++
 	v.prompts = append(v.prompts, prompt)
 	if v.startErr != nil {
@@ -452,7 +452,7 @@ func TestCachingVerifier_CachesRecentSuccess(t *testing.T) {
 	inner := &fakeVerifier{nextResult: VerifyResult{OK: true}}
 	v := newCachingVerifier(inner)
 
-	ch1, err := v.VerifyUser("first")
+	ch1, err := v.VerifyUser("first", nil)
 	if err != nil {
 		t.Fatalf("first VerifyUser: %s", err)
 	}
@@ -463,7 +463,7 @@ func TestCachingVerifier_CachesRecentSuccess(t *testing.T) {
 		t.Fatalf("after first call, inner.callCount = %d, want 1", inner.callCount)
 	}
 
-	ch2, err := v.VerifyUser("second")
+	ch2, err := v.VerifyUser("second", nil)
 	if err != nil {
 		t.Fatalf("second VerifyUser: %s", err)
 	}
@@ -479,12 +479,12 @@ func TestCachingVerifier_DoesNotCacheFailure(t *testing.T) {
 	inner := &fakeVerifier{nextResult: VerifyResult{OK: false}}
 	v := newCachingVerifier(inner)
 
-	ch1, _ := v.VerifyUser("a")
+	ch1, _ := v.VerifyUser("a", nil)
 	if r := <-ch1; r.OK {
 		t.Fatalf("first result must not be OK; got %+v", r)
 	}
 
-	ch2, _ := v.VerifyUser("b")
+	ch2, _ := v.VerifyUser("b", nil)
 	if r := <-ch2; r.OK {
 		t.Errorf("second result must not be OK from cache after a failure; got %+v", r)
 	}
@@ -500,7 +500,7 @@ func TestCachingVerifier_CacheExpires(t *testing.T) {
 	now := time.Now()
 	v.now = func() time.Time { return now }
 
-	ch1, _ := v.VerifyUser("a")
+	ch1, _ := v.VerifyUser("a", nil)
 	<-ch1
 	if inner.callCount != 1 {
 		t.Fatalf("after first call, inner.callCount = %d, want 1", inner.callCount)
@@ -508,7 +508,7 @@ func TestCachingVerifier_CacheExpires(t *testing.T) {
 
 	now = now.Add(2 * uvCacheTTL)
 
-	ch2, _ := v.VerifyUser("b")
+	ch2, _ := v.VerifyUser("b", nil)
 	<-ch2
 	if inner.callCount != 2 {
 		t.Errorf("expired cache should not short-circuit; inner.callCount = %d, want 2", inner.callCount)

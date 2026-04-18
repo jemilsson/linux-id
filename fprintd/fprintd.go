@@ -47,6 +47,15 @@ func New() *Fprintd { return &Fprintd{} }
 // VerifyPresence starts a fingerprint scan. If one is already in progress,
 // returns the same result channel (deduplication for browser retries).
 func (f *Fprintd) VerifyPresence() (chan Result, error) {
+	return f.VerifyPresenceWithProgress(nil)
+}
+
+// VerifyPresenceWithProgress is VerifyPresence with a callback invoked on
+// each verify-status signal from fprintd (e.g. "verify-no-match",
+// "verify-retry-scan", "verify-match"). Useful for updating a UI
+// notification as the scan progresses. The callback runs in the verify
+// goroutine; it must be cheap and non-blocking.
+func (f *Fprintd) VerifyPresenceWithProgress(onProgress func(string)) (chan Result, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -57,7 +66,7 @@ func (f *Fprintd) VerifyPresence() (chan Result, error) {
 	ch := make(chan Result, 1)
 	f.active = ch
 	go func() {
-		err := verifyFingerprint()
+		err := verifyFingerprint(onProgress)
 		result := Result{OK: err == nil, Error: err}
 		f.mu.Lock()
 		f.active = nil
@@ -67,7 +76,7 @@ func (f *Fprintd) VerifyPresence() (chan Result, error) {
 	return ch, nil
 }
 
-func verifyFingerprint() error {
+func verifyFingerprint(onProgress func(string)) error {
 	conn, err := dbus.ConnectSystemBus()
 	if err != nil {
 		return err
@@ -139,7 +148,7 @@ func verifyFingerprint() error {
 			log.Printf("fprintd: drained %d phantom signal(s) before attempt %d", dropped, attempt)
 		}
 
-		err := waitForVerifyResult(ctx, sigCh)
+		err := waitForVerifyResult(ctx, sigCh, onProgress)
 		if err == nil {
 			log.Printf("fprintd: attempt %d/%d matched", attempt, maxAttempts)
 			return nil
@@ -154,7 +163,7 @@ func verifyFingerprint() error {
 	return lastErr
 }
 
-func waitForVerifyResult(ctx context.Context, sigCh <-chan *dbus.Signal) error {
+func waitForVerifyResult(ctx context.Context, sigCh <-chan *dbus.Signal, onProgress func(string)) error {
 	for {
 		select {
 		case sig := <-sigCh:
@@ -162,6 +171,9 @@ func waitForVerifyResult(ctx context.Context, sigCh <-chan *dbus.Signal) error {
 				name, _ := sig.Body[0].(string)
 				done, _ := sig.Body[1].(bool)
 				log.Printf("fprintd: signal %q done=%v", name, done)
+				if onProgress != nil {
+					onProgress(name)
+				}
 			}
 			matched, terminal, err := processVerifyStatus(sig.Body)
 			if matched {

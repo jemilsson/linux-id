@@ -86,6 +86,31 @@ type VerifyResult struct {
 	Error  error
 }
 
+// fprintStatusLabel maps fprintd verify-status names to a short
+// human-readable line shown in the active notification body.
+func fprintStatusLabel(status string) string {
+	switch status {
+	case "verify-no-match":
+		return "no match, try again"
+	case "verify-retry-scan":
+		return "scan unclear, try again"
+	case "verify-swipe-too-short":
+		return "swipe too short, try again"
+	case "verify-finger-not-centered":
+		return "finger not centered, try again"
+	case "verify-remove-and-retry":
+		return "remove finger and retry"
+	case "verify-match":
+		return "approved"
+	case "verify-disconnected":
+		return "fingerprint reader disconnected"
+	case "verify-unknown-error":
+		return "fingerprint reader error"
+	default:
+		return status
+	}
+}
+
 func statusForFailure(r VerifyResult) byte {
 	if r.Reason == ReasonNoMatch {
 		return ctap2.StatusUVInvalid
@@ -96,8 +121,11 @@ func statusForFailure(r VerifyResult) byte {
 // UserVerifier abstracts over user confirmation methods for CTAP2.
 // pinentry provides User Presence (UP); fprintd provides User Verification (UV).
 type UserVerifier interface {
-	// VerifyUser starts verification and returns a result channel.
-	VerifyUser(prompt string) (<-chan VerifyResult, error)
+	// VerifyUser starts verification and returns a result channel. onProgress,
+	// if non-nil, is called from a goroutine with each interim status string
+	// the verifier produces (e.g. fprintd verify-status names). Verifiers
+	// that have no interim status (pinentry, auto-approve) ignore it.
+	VerifyUser(prompt string, onProgress func(string)) (<-chan VerifyResult, error)
 	// PerformsUV returns true only when the verifier actually identifies the user
 	// (e.g. fingerprint). Used to set the UV flag in authenticatorData honestly.
 	PerformsUV() bool
@@ -105,7 +133,7 @@ type UserVerifier interface {
 
 type pinentryVerifier struct{ pe *pinentry.Pinentry }
 
-func (v *pinentryVerifier) VerifyUser(prompt string) (<-chan VerifyResult, error) {
+func (v *pinentryVerifier) VerifyUser(prompt string, _ func(string)) (<-chan VerifyResult, error) {
 	ch, err := v.pe.ConfirmGeneric(prompt)
 	if err != nil {
 		return nil, err
@@ -119,8 +147,8 @@ func (v *pinentryVerifier) PerformsUV() bool { return false }
 
 type fprintdVerifier struct{ fp *fprintd.Fprintd }
 
-func (v *fprintdVerifier) VerifyUser(prompt string) (<-chan VerifyResult, error) {
-	ch, err := v.fp.VerifyPresence()
+func (v *fprintdVerifier) VerifyUser(_ string, onProgress func(string)) (<-chan VerifyResult, error) {
+	ch, err := v.fp.VerifyPresenceWithProgress(onProgress)
 	if err != nil {
 		return nil, err
 	}
@@ -156,7 +184,7 @@ func newCachingVerifierWithTTL(inner UserVerifier, ttl time.Duration) *cachingVe
 	return &cachingVerifier{inner: inner, ttl: ttl, now: time.Now}
 }
 
-func (v *cachingVerifier) VerifyUser(prompt string) (<-chan VerifyResult, error) {
+func (v *cachingVerifier) VerifyUser(prompt string, onProgress func(string)) (<-chan VerifyResult, error) {
 	v.mu.Lock()
 	if !v.lastOK.IsZero() && v.now().Sub(v.lastOK) < v.ttl {
 		v.mu.Unlock()
@@ -167,7 +195,7 @@ func (v *cachingVerifier) VerifyUser(prompt string) (<-chan VerifyResult, error)
 	}
 	v.mu.Unlock()
 
-	innerCh, err := v.inner.VerifyUser(prompt)
+	innerCh, err := v.inner.VerifyUser(prompt, onProgress)
 	if err != nil {
 		return nil, err
 	}
@@ -190,7 +218,7 @@ func (v *cachingVerifier) PerformsUV() bool { return v.inner.PerformsUV() }
 // Used when global auto_approve_all is set for headless/agent operation.
 type autoApproveVerifier struct{}
 
-func (v *autoApproveVerifier) VerifyUser(prompt string) (<-chan VerifyResult, error) {
+func (v *autoApproveVerifier) VerifyUser(_ string, _ func(string)) (<-chan VerifyResult, error) {
 	ch := make(chan VerifyResult, 1)
 	ch <- VerifyResult{OK: true}
 	return ch, nil
@@ -387,13 +415,14 @@ func (s *server) handleAuthenticate(parentCtx context.Context, token tokenRespon
 
 		id := signid.From(req.Authenticate.ChallengeParam[:])
 		log.Printf("U2F Auth: prompting id=%s hash=%s", id, signid.Full(req.Authenticate.ChallengeParam[:]))
-		n := notify.Send(
-			"Signature request",
-			fmt.Sprintf("id:   %s\nfrom: linux-id (%s) U2F auth", id, *deviceName),
-		)
+		baseBody := fmt.Sprintf("id:   %s\nfrom: linux-id (%s) U2F auth", id, *deviceName)
+		n := notify.Send("Signature request", baseBody)
 		defer n.Close()
+		onProgress := func(status string) {
+			n.Update(baseBody + "\n\n" + fprintStatusLabel(status))
+		}
 		verifyStart := time.Now()
-		resultCh, err := s.verifier.VerifyUser(fmt.Sprintf("FIDO U2F Auth [id %s]", id))
+		resultCh, err := s.verifier.VerifyUser(fmt.Sprintf("FIDO U2F Auth [id %s]", id), onProgress)
 
 		if err != nil {
 			log.Printf("U2F verifier err: %s", err)
@@ -672,13 +701,14 @@ func (s *server) handleMakeCredential(ctx context.Context, token tokenResponder,
 	} else {
 		id := signid.From(req.ClientDataHash)
 		log.Printf("MakeCredential: prompting for rp=%s id=%s hash=%s", req.RP.ID, id, signid.Full(req.ClientDataHash))
-		n := notify.Send(
-			"Registration request",
-			fmt.Sprintf("id:   %s\nfrom: linux-id (%s)\nrpid: %s", id, *deviceName, req.RP.ID),
-		)
+		baseBody := fmt.Sprintf("id:   %s\nfrom: linux-id (%s)\nrpid: %s", id, *deviceName, req.RP.ID)
+		n := notify.Send("Registration request", baseBody)
 		defer n.Close()
+		onProgress := func(status string) {
+			n.Update(baseBody + "\n\n" + fprintStatusLabel(status))
+		}
 		verifyStart := time.Now()
-		resultCh, err := s.verifier.VerifyUser(fmt.Sprintf("FIDO2 Register: %s [id %s]", req.RP.ID, id))
+		resultCh, err := s.verifier.VerifyUser(fmt.Sprintf("FIDO2 Register: %s [id %s]", req.RP.ID, id), onProgress)
 		if err != nil {
 			log.Printf("MakeCredential verifier err: %s", err)
 			token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
@@ -929,13 +959,14 @@ func (s *server) handleGetAssertion(ctx context.Context, token tokenResponder, e
 	} else if upRequired {
 		id := signid.From(req.ClientDataHash)
 		log.Printf("GetAssertion: prompting for rp=%s id=%s hash=%s", req.RPID, id, signid.Full(req.ClientDataHash))
-		n := notify.Send(
-			"Signature request",
-			fmt.Sprintf("id:   %s\nfrom: linux-id (%s)\nrpid: %s", id, *deviceName, req.RPID),
-		)
+		baseBody := fmt.Sprintf("id:   %s\nfrom: linux-id (%s)\nrpid: %s", id, *deviceName, req.RPID)
+		n := notify.Send("Signature request", baseBody)
 		defer n.Close()
+		onProgress := func(status string) {
+			n.Update(baseBody + "\n\n" + fprintStatusLabel(status))
+		}
 		verifyStart := time.Now()
-		resultCh, err := s.verifier.VerifyUser(fmt.Sprintf("FIDO2 Authenticate: %s [id %s]", req.RPID, id))
+		resultCh, err := s.verifier.VerifyUser(fmt.Sprintf("FIDO2 Authenticate: %s [id %s]", req.RPID, id), onProgress)
 		if err != nil {
 			log.Printf("GetAssertion verifier err: %s", err)
 			token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)

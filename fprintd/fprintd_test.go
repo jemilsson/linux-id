@@ -121,7 +121,7 @@ func TestWaitForVerifyResult(t *testing.T) {
 	t.Run("success on first signal", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
-		err := waitForVerifyResult(ctx, feed([]interface{}{"verify-match", true}))
+		err := waitForVerifyResult(ctx, feed([]interface{}{"verify-match", true}), nil)
 		if err != nil {
 			t.Errorf("err = %v, want nil", err)
 		}
@@ -130,7 +130,7 @@ func TestWaitForVerifyResult(t *testing.T) {
 	t.Run("no-match returns ErrNoMatch", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
-		err := waitForVerifyResult(ctx, feed([]interface{}{"verify-no-match", true}))
+		err := waitForVerifyResult(ctx, feed([]interface{}{"verify-no-match", true}), nil)
 		if !errors.Is(err, ErrNoMatch) {
 			t.Errorf("err = %v, want ErrNoMatch", err)
 		}
@@ -143,7 +143,7 @@ func TestWaitForVerifyResult(t *testing.T) {
 			[]interface{}{"verify-retry-scan", false},
 			[]interface{}{"verify-swipe-too-short", false},
 			[]interface{}{"verify-match", true},
-		))
+		), nil)
 		if err != nil {
 			t.Errorf("err = %v, want nil", err)
 		}
@@ -155,7 +155,7 @@ func TestWaitForVerifyResult(t *testing.T) {
 		err := waitForVerifyResult(ctx, feed(
 			[]interface{}{"verify-finger-not-centered", false},
 			[]interface{}{"verify-no-match", true},
-		))
+		), nil)
 		if !errors.Is(err, ErrNoMatch) {
 			t.Errorf("err = %v, want ErrNoMatch", err)
 		}
@@ -164,7 +164,7 @@ func TestWaitForVerifyResult(t *testing.T) {
 	t.Run("disconnected returns wrapped error", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
-		err := waitForVerifyResult(ctx, feed([]interface{}{"verify-disconnected", true}))
+		err := waitForVerifyResult(ctx, feed([]interface{}{"verify-disconnected", true}), nil)
 		if err == nil {
 			t.Errorf("err = nil, want disconnect error")
 		}
@@ -177,7 +177,7 @@ func TestWaitForVerifyResult(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 		defer cancel()
 		empty := make(chan *dbus.Signal)
-		err := waitForVerifyResult(ctx, empty)
+		err := waitForVerifyResult(ctx, empty, nil)
 		if err == nil {
 			t.Errorf("err = nil, want timeout error")
 		}
